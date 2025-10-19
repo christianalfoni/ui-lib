@@ -62,6 +62,15 @@ export const Fragment = (props: { children?: Child }) => {
 export namespace JSX {
   export type Element = Node | (() => any);
 
+  // Key attribute available for all elements
+  export interface ElementAttributesProperty {
+    props: {};
+  }
+
+  export interface IntrinsicAttributes {
+    key?: string | number;
+  }
+
   export interface IntrinsicElements {
     // Document metadata
     base: HTMLAttributes<HTMLBaseElement>;
@@ -204,9 +213,6 @@ export namespace JSX {
 
   // Base attributes
   interface HTMLAttributes<T = HTMLElement> extends AriaAttributes, DOMAttributes<T> {
-    // Key for list reconciliation
-    key?: string | number;
-
     // Standard HTML attributes
     accesskey?: MaybeReactive<string>;
     class?: MaybeReactive<ClassNameValue>;
