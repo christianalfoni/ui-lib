@@ -1,0 +1,12 @@
+{
+  "name": "ui-lib-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=demo",
+    "build:lib": "npm run build --workspace=lib",
+    "dev:all": "npm run dev:lib --workspace=lib & npm run dev --workspace=demo"
+  }
+}
