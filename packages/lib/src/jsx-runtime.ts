@@ -2,35 +2,40 @@
  * JSX automatic runtime for @ui-lib/lib
  */
 
-import { h } from "./jsx";
+import { createElement } from "./jsx";
 import type { Child } from "./jsx";
 
 /**
  * JSX automatic runtime - used by TypeScript when jsx: "react-jsx" is set
  */
-export function jsx(type: any, props: any): Node {
+export function jsx(type: any, props: any): ReturnType<typeof createElement> {
   const { children, key, __source, __self, ...rest } = props;
-  if (key !== undefined) {
-    rest.key = key;
-  }
-  // Only pass children if it's defined
-  if (children !== undefined) {
-    return h(type, rest, children);
-  }
-  return h(type, rest);
+
+  // Build props object with key if present
+  const elementProps = key !== undefined ? { ...rest, key } : rest;
+
+  // Normalize children to array
+  const childrenArray = children !== undefined ? (Array.isArray(children) ? children : [children]) : [];
+
+  return createElement(type, elementProps, childrenArray);
 }
 
 /**
  * JSX automatic runtime for elements with multiple children
  */
-export function jsxs(type: any, props: any): Node {
+export function jsxs(type: any, props: any): ReturnType<typeof createElement> {
   return jsx(type, props);
 }
 
 /**
  * JSX DEV runtime - used in development mode
  */
-export function jsxDEV(type: any, props: any, _key?: any, _isStaticChildren?: boolean, _source?: any, _self?: any): Node {
+export function jsxDEV(type: any, props: any, key?: any, _isStaticChildren?: boolean, _source?: any, _self?: any): ReturnType<typeof createElement> {
+  // In dev mode, key is passed as a separate parameter
+  if (key !== undefined) {
+    props = { ...props, key };
+  }
+
   return jsx(type, props);
 }
 
@@ -199,6 +204,9 @@ export namespace JSX {
 
   // Base attributes
   interface HTMLAttributes<T = HTMLElement> extends AriaAttributes, DOMAttributes<T> {
+    // Key for list reconciliation
+    key?: string | number;
+
     // Standard HTML attributes
     accesskey?: MaybeReactive<string>;
     class?: MaybeReactive<ClassNameValue>;

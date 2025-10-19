@@ -6,6 +6,8 @@ export type Cleanup = () => void;
 export type Computation = { run: () => void; cleanup?: Cleanup };
 
 let CURRENT: Computation | null = null;
+let BATCHING = false;
+const PENDING_NOTIFICATIONS = new Set<() => void>();
 
 // Track which properties are accessed for each computation
 const propertyListeners = new WeakMap<object, Map<string | symbol, Set<Computation>>>();
@@ -22,6 +24,27 @@ const proxyCache = new WeakMap<object, any>();
 const ARRAY_MUTATORS = new Set([
   'push', 'pop', 'shift', 'unshift', 'splice', 'sort', 'reverse', 'fill', 'copyWithin'
 ]);
+
+/**
+ * Batches multiple state updates to trigger only one reaction
+ */
+export function batch<T>(fn: () => T): T {
+  const wasBatching = BATCHING;
+  BATCHING = true;
+
+  try {
+    return fn();
+  } finally {
+    BATCHING = wasBatching;
+
+    // If we're not nested in another batch, flush pending notifications
+    if (!wasBatching) {
+      const pending = Array.from(PENDING_NOTIFICATIONS);
+      PENDING_NOTIFICATIONS.clear();
+      pending.forEach(fn => fn());
+    }
+  }
+}
 
 /**
  * Creates a reactive proxy that tracks property access and mutations
@@ -73,11 +96,27 @@ function createReactiveProxy<T extends object>(target: T): T {
       // For arrays, wrap mutating methods to trigger reactivity
       if (Array.isArray(obj) && typeof value === 'function' && ARRAY_MUTATORS.has(prop as string)) {
         return function(this: any, ...args: any[]) {
+          // Batch notifications during the array mutation
+          const wasBatching = BATCHING;
+          BATCHING = true;
+
           const result = (value as Function).apply(this, args);
+
+          // Restore batching state
+          BATCHING = wasBatching;
+
           // Trigger all listeners for this array
           notifyListeners(obj, prop);
           // Also trigger length listeners since array mutations change length
           notifyListeners(obj, 'length');
+
+          // If we're not nested in another batch, flush pending notifications
+          if (!wasBatching) {
+            const pending = Array.from(PENDING_NOTIFICATIONS);
+            PENDING_NOTIFICATIONS.clear();
+            pending.forEach(fn => fn());
+          }
+
           return result;
         };
       }
@@ -96,7 +135,12 @@ function createReactiveProxy<T extends object>(target: T): T {
 
       // Only notify if value actually changed
       if (oldValue !== value) {
-        notifyListeners(obj, prop);
+        // If we're batching, defer the notification
+        if (BATCHING) {
+          PENDING_NOTIFICATIONS.add(() => notifyListeners(obj, prop));
+        } else {
+          notifyListeners(obj, prop);
+        }
       }
 
       return result;

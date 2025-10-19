@@ -1,10 +1,89 @@
-import { render, createState, Fragment } from "@ui-lib/lib";
+import { render, createState, batch, Fragment } from "@ui-lib/lib";
+
+let componentCreationCount = 0;
 
 // Test 1: Reactive component that returns a function (dynamic null)
 function ReactiveComponent() {
   const state = createState({ count: 0 });
 
   return () => state.count % 2 ? <div>Count is odd: {() => state.count}</div> : null;
+}
+
+// Test: Keyed array optimization
+function KeyedArrayTest() {
+  const state = createState({
+    items: [
+      { id: 1, name: 'Item 1' },
+      { id: 2, name: 'Item 2' },
+      { id: 3, name: 'Item 3' }
+    ]
+  });
+
+  const ItemComponent = ({ item }: { item: { id: number, name: string } }) => {
+    const creationId = ++componentCreationCount;
+
+    return (
+      <div style={{
+        padding: "5px",
+        margin: "5px",
+        border: "1px solid #ccc",
+        background: "#f0f0f0"
+      }}>
+        {item.name} (created as #{creationId})
+      </div>
+    );
+  };
+
+  const addItem = () => {
+    const newId = Math.max(...state.items.map(i => i.id)) + 1;
+    state.items.push({ id: newId, name: `Item ${newId}` });
+  };
+
+  const removeFirst = () => {
+    state.items.shift();
+  };
+
+  const reverse = () => {
+    state.items.reverse();
+  };
+
+  const batchUpdate = () => {
+    batch(() => {
+      const startId = Math.max(...state.items.map(i => i.id)) + 1;
+      state.items.push({ id: startId, name: `Item ${startId}` });
+      state.items.push({ id: startId + 1, name: `Item ${startId + 1}` });
+      state.items.push({ id: startId + 2, name: `Item ${startId + 2}` });
+    });
+  };
+
+  const resetCount = () => {
+    componentCreationCount = 0;
+  };
+
+  return (
+    <div style={{ border: "1px solid purple", padding: "10px", margin: "10px" }}>
+      <h3>Keyed Array Optimization Test</h3>
+      <p style={{ fontSize: "12px", color: "#666" }}>
+        Components are only created for new items. Existing items are reused and repositioned efficiently. Try "Batch +3" to see batched updates!
+      </p>
+      <div>
+        <button onClick={addItem}>Add Item</button>
+        {" "}
+        <button onClick={removeFirst}>Remove First</button>
+        {" "}
+        <button onClick={reverse}>Reverse</button>
+        {" "}
+        <button onClick={batchUpdate}>Batch +3</button>
+        {" "}
+        <button onClick={resetCount}>Reset Counter</button>
+      </div>
+      <div>
+        {() => state.items.map(item => (
+          <ItemComponent key={item.id} item={item} />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // Test 2: Fragments with multiple children
@@ -71,6 +150,7 @@ function App() {
         </div>
       </div>
 
+      <KeyedArrayTest />
       <FragmentTest />
       <NestedReactive />
     </div>

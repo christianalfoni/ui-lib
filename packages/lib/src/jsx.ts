@@ -5,16 +5,32 @@
 import { autorun } from "./createState";
 import { setProp, createRegion, type Props } from "./dom";
 
-export type Child = Node | string | number | boolean | null | undefined | Child[] | (() => any);
 export type Key = string | number;
 
 /**
- * JSX factory function (pragma)
+ * Internal type for keyed items before evaluation
  */
-export function h(type: any, props: Props | null, ...restChildren: Child[]): Node {
-  props = props || {};
-  const { key, children: propChildren, ...rest } = props as Props & { key?: Key };
-  const children: Child[] = propChildren !== undefined ? [propChildren, ...restChildren] : restChildren;
+type KeyedItem = {
+  key: Key;
+  value: any;
+};
+
+export type Child = Node | string | number | boolean | null | undefined | Child[] | (() => any) | KeyedItem;
+
+/**
+ * Internal function that handles element creation
+ * Used by both h() and jsx() runtimes
+ */
+export function createElement(type: any, props: Record<string, any>, children: Child[]): Node | KeyedItem {
+  const { key, ...rest } = props;
+
+  // If we have a key, delay evaluation by returning a KeyedItem
+  if (key !== undefined) {
+    return {
+      key,
+      value: { type, props: rest, children }
+    };
+  }
 
   if (typeof type === "function") {
     // Components run once, return a Node (or nodes via nested scopes)
@@ -31,7 +47,6 @@ export function h(type: any, props: Props | null, ...restChildren: Child[]): Nod
 
   // Intrinsic element
   const el = document.createElement(type);
-  if (key !== undefined) (el as any).__key = key; // stash key on node
 
   for (const [k, v] of Object.entries(rest)) setProp(el as HTMLElement, k, v);
   for (const c of children) appendChild(el, c);
@@ -39,12 +54,62 @@ export function h(type: any, props: Props | null, ...restChildren: Child[]): Nod
 }
 
 /**
+ * JSX factory function (pragma)
+ */
+export function h(type: any, props: Props | null, ...restChildren: Child[]): Node | KeyedItem {
+  props = props || {};
+  const { children: propChildren, ...rest } = props as Props & { key?: Key };
+  const children: Child[] = propChildren !== undefined ? [propChildren, ...restChildren] : restChildren;
+
+  return createElement(type, rest, children);
+}
+
+/**
+ * Helper to check if value is a KeyedItem
+ */
+function isKeyedItem(value: any): value is KeyedItem {
+  return value && typeof value === 'object' && 'key' in value && 'value' in value;
+}
+
+/**
+ * Evaluates a KeyedItem into an actual Node
+ */
+function evaluateKeyedItem(item: KeyedItem): Node {
+  const { type, props, children } = item.value;
+
+  if (typeof type === "function") {
+    // Components run once, return a Node (or nodes via nested scopes)
+    const result = type({ ...props, children });
+
+    // If component returns a function, treat it as a reactive component
+    // The function will be handled by appendChild as a reactive child
+    if (typeof result === "function") {
+      return result as any;
+    }
+
+    const node = result as Node;
+    (node as any).__key = item.key;
+    return node;
+  }
+
+  // Intrinsic element
+  const el = document.createElement(type);
+  (el as any).__key = item.key;
+
+  for (const [k, v] of Object.entries(props)) setProp(el as HTMLElement, k, v);
+  for (const c of children) appendChild(el, c);
+  return el;
+}
+
+/**
  * Renders a node into a container element
  */
-export function render(node: Node | (() => any), container: Element): void {
+export function render(node: Node | KeyedItem | (() => any), container: Element): void {
   if (typeof node === 'function') {
     // Handle reactive component - use appendChild to set up reactive region
     appendChild(container, node);
+  } else if (isKeyedItem(node)) {
+    container.appendChild(evaluateKeyedItem(node));
   } else {
     container.appendChild(node);
   }
@@ -77,6 +142,10 @@ function appendChild(parent: Node, child: Child): void {
           for (const i of x) flatten(i, acc);
           return;
         }
+        if (isKeyedItem(x)) {
+          acc.push(x);
+          return;
+        }
         if (x instanceof Node) {
           acc.push(x);
           return;
@@ -97,7 +166,14 @@ function appendChild(parent: Node, child: Child): void {
 
       // Single node/text
       if (!Array.isArray(out)) {
-        const node = out instanceof Node ? out : document.createTextNode(String(out));
+        let node: Node;
+        if (isKeyedItem(out)) {
+          node = evaluateKeyedItem(out);
+        } else if (out instanceof Node) {
+          node = out;
+        } else {
+          node = document.createTextNode(String(out));
+        }
         if (mode === "single" && singleNode === node) return; // nothing
         region.clearContent();
         region.insertBeforeRef(node, null);
@@ -108,56 +184,68 @@ function appendChild(parent: Node, child: Child): void {
       }
 
       // Array case
-      const next: Node[] = [];
-      flatten(out, next);
+      const flattened: any[] = [];
+      flatten(out, flattened);
 
-      // If any item lacks a key => replace-all (simple mode)
-      const allKeyed =
-        next.length === 0 ? true : next.every(n => (n as any).__key !== undefined);
+      // Check if we have KeyedItems (delay evaluation) or regular nodes
+      const allKeyed = flattened.length === 0 ? false : flattened.every(isKeyedItem);
 
       if (!allKeyed) {
-        // replace everything
+        // Replace everything - either non-keyed or mixed
+        // Evaluate any KeyedItems that slipped through
+        const nodes: Node[] = [];
+        for (const item of flattened) {
+          if (isKeyedItem(item)) {
+            nodes.push(evaluateKeyedItem(item));
+          } else if (item instanceof Node) {
+            nodes.push(item);
+          } else {
+            nodes.push(document.createTextNode(String(item)));
+          }
+        }
         region.clearContent();
-        for (const n of next) region.insertBeforeRef(n, null);
-        arrayNodes = next;
+        for (const n of nodes) region.insertBeforeRef(n, null);
+        arrayNodes = nodes;
         singleNode = null;
         mode = "array";
         return;
       }
 
-      // Keyed diff (single-node granularity)
+      // Keyed diff - items are KeyedItems, evaluate only when needed
+      const keyedItems = flattened as KeyedItem[];
       const oldByKey = new Map<Key, Node>();
       for (const n of arrayNodes) oldByKey.set((n as any).__key, n);
 
-      const newKeys = next.map(n => (n as any).__key as Key);
-      const kept = new Set<Key>();
+      const newKeys = keyedItems.map(item => item.key);
+      const newKeySet = new Set(newKeys);
 
-      // Walk from end so we can use a moving "ref"
-      let ref: Node | null = region.end; // insert before this; starts at tail
-      for (let i = next.length - 1; i >= 0; i--) {
-        const k = newKeys[i];
-        const want = next[i];
-        const existing = oldByKey.get(k);
-        if (existing) {
-          kept.add(k);
-          // Move existing before current ref if needed
-          if (existing.nextSibling !== ref) {
-            const range = document.createRange();
-            range.selectNode(existing);
-            const frag = range.extractContents();
-            region.insertBeforeRef(frag, ref);
-          }
-          ref = existing;
-        } else {
-          // New node: just insert
-          region.insertBeforeRef(want, ref);
-          ref = want;
+      // First pass: remove nodes that are no longer needed
+      for (const [k, node] of oldByKey) {
+        if (!newKeySet.has(k)) {
+          node.parentNode?.removeChild(node);
+          oldByKey.delete(k);
         }
       }
 
-      // Remove old nodes that weren't kept
-      for (const [k, node] of oldByKey) {
-        if (!kept.has(k)) node.parentNode?.removeChild(node);
+      // Second pass: reorder/insert nodes from end to start
+      let ref: Node | null = region.end; // insert before this; starts at tail
+      for (let i = keyedItems.length - 1; i >= 0; i--) {
+        const k = newKeys[i];
+        const existing = oldByKey.get(k);
+        if (existing) {
+          // Reuse existing node - don't evaluate the component!
+          // Move existing before current ref if needed
+          if (existing.nextSibling !== ref) {
+            // Use parent's insertBefore directly to move the node
+            region.end.parentNode!.insertBefore(existing, ref);
+          }
+          ref = existing;
+        } else {
+          // New key: evaluate the KeyedItem NOW to create the node
+          const newNode = evaluateKeyedItem(keyedItems[i]);
+          region.insertBeforeRef(newNode, ref);
+          ref = newNode;
+        }
       }
 
       // Recompute by scanning siblings between start/end
