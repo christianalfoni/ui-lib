@@ -18,7 +18,15 @@ export function h(type: any, props: Props | null, ...restChildren: Child[]): Nod
 
   if (typeof type === "function") {
     // Components run once, return a Node (or nodes via nested scopes)
-    return type({ ...rest, children });
+    const result = type({ ...rest, children });
+
+    // If component returns a function, treat it as a reactive component
+    // The function will be handled by appendChild as a reactive child
+    if (typeof result === "function") {
+      return result as any;
+    }
+
+    return result;
   }
 
   // Intrinsic element
@@ -33,8 +41,13 @@ export function h(type: any, props: Props | null, ...restChildren: Child[]): Nod
 /**
  * Renders a node into a container element
  */
-export function render(node: Node, container: Element): void {
-  container.appendChild(node);
+export function render(node: Node | (() => any), container: Element): void {
+  if (typeof node === 'function') {
+    // Handle reactive component - use appendChild to set up reactive region
+    appendChild(container, node);
+  } else {
+    container.appendChild(node);
+  }
 }
 
 /**
@@ -43,7 +56,7 @@ export function render(node: Node, container: Element): void {
 function appendChild(parent: Node, child: Child): void {
   if (child == null || child === false) return;
 
-  // Function child => observation scope with array support
+  // Function child => reactive region with array support
   if (typeof child === "function") {
     const region = createRegion(parent);
     // Track current mode
@@ -51,7 +64,10 @@ function appendChild(parent: Node, child: Child): void {
     let singleNode: Node | null = null;
     let arrayNodes: Node[] = []; // current nodes (keyed or not)
 
-    const dispose = autorun(() => {
+    const dispose = autorun((onCleanup) => {
+      // IMPORTANT: Don't register the autorun's dispose with the region's cleanup
+      // The autorun manages its own lifecycle independently
+      // Only clean up DOM nodes and their associated listeners
       let out = (child as () => any)();
 
       // Normalize arrays produced by nested maps, etc.
@@ -71,7 +87,7 @@ function appendChild(parent: Node, child: Child): void {
       // null/false -> clear
       if (out == null || out === false) {
         if (mode !== "none") {
-          region.clearAll();
+          region.clearContent();
           singleNode = null;
           arrayNodes = [];
           mode = "none";
@@ -83,7 +99,7 @@ function appendChild(parent: Node, child: Child): void {
       if (!Array.isArray(out)) {
         const node = out instanceof Node ? out : document.createTextNode(String(out));
         if (mode === "single" && singleNode === node) return; // nothing
-        region.clearAll();
+        region.clearContent();
         region.insertBeforeRef(node, null);
         singleNode = node;
         arrayNodes = [];
@@ -101,7 +117,7 @@ function appendChild(parent: Node, child: Child): void {
 
       if (!allKeyed) {
         // replace everything
-        region.clearAll();
+        region.clearContent();
         for (const n of next) region.insertBeforeRef(n, null);
         arrayNodes = next;
         singleNode = null;
@@ -156,7 +172,7 @@ function appendChild(parent: Node, child: Child): void {
       mode = "array";
     });
 
-    // Register the autorun disposal with the region
+    // Register the autorun disposal to run when the region is actually unmounted
     region.addCleanup(dispose);
 
     return;

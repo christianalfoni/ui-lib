@@ -55,7 +55,17 @@ function createReactiveProxy<T extends object>(target: T): T {
           subs = new Set();
           computationSubscriptions.set(CURRENT, subs);
         }
-        subs.add({ obj, prop });
+        // Check if we already have this subscription to avoid duplicates
+        let found = false;
+        for (const sub of subs) {
+          if (sub.obj === obj && sub.prop === prop) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          subs.add({ obj, prop });
+        }
       }
 
       const value = Reflect.get(obj, prop);
@@ -113,14 +123,14 @@ function notifyListeners(obj: object, prop: string | symbol) {
   const listeners = propsMap.get(prop);
   if (!listeners) return;
 
+  // Copy listeners to avoid issues if set is modified during iteration
+  const listenersArray = [...listeners];
+
   // Run all computations that depend on this property
-  for (const computation of [...listeners]) {
-    try {
-      computation.cleanup?.();
-    } finally {
-      computation.cleanup = undefined;
-      computation.run();
-    }
+  for (const computation of listenersArray) {
+    computation.cleanup?.();
+    computation.cleanup = undefined;
+    computation.run();
   }
 }
 
@@ -140,21 +150,6 @@ export function createState<T extends object>(initial: T): T {
 export function autorun(effect: (onCleanup: (fn: () => void) => void) => void) {
   const comp: Computation = {
     run() {
-      // Clear previous subscriptions before re-running
-      const subs = computationSubscriptions.get(comp);
-      if (subs) {
-        for (const { obj, prop } of subs) {
-          const propsMap = propertyListeners.get(obj);
-          if (propsMap) {
-            const listeners = propsMap.get(prop);
-            if (listeners) {
-              listeners.delete(comp);
-            }
-          }
-        }
-        subs.clear();
-      }
-
       const prev = CURRENT;
       CURRENT = comp;
       try {
@@ -170,14 +165,14 @@ export function autorun(effect: (onCleanup: (fn: () => void) => void) => void) {
   return () => {
     comp.cleanup?.();
     // Remove this computation from all property listeners
-    removeComputationFromAllListeners(comp);
+    clearComputationSubscriptions(comp);
   };
 }
 
 /**
- * Removes a computation from all property listener maps
+ * Clears a computation's subscriptions from property listeners
  */
-function removeComputationFromAllListeners(comp: Computation) {
+function clearComputationSubscriptions(comp: Computation) {
   const subs = computationSubscriptions.get(comp);
   if (!subs) return;
 

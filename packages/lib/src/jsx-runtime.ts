@@ -35,16 +35,27 @@ export function jsxDEV(type: any, props: any, _key?: any, _isStaticChildren?: bo
 }
 
 /**
- * Fragment support (not yet implemented)
+ * Fragment support - returns children without a wrapper element
  */
 export const Fragment = (props: { children?: Child }) => {
-  // For now, just return children as-is
-  // You may want to implement proper fragment handling later
-  return props.children as any;
+  const { children } = props;
+
+  // Normalize children to an array
+  if (children === undefined || children === null) {
+    return null;
+  }
+
+  if (Array.isArray(children)) {
+    // Return array of children directly
+    return children.length === 0 ? null : children.length === 1 ? children[0] as any : children as any;
+  }
+
+  // Single child
+  return children as any;
 };
 
 export namespace JSX {
-  export type Element = Node;
+  export type Element = Node | (() => any);
 
   export interface IntrinsicElements {
     // Document metadata
@@ -180,12 +191,18 @@ export namespace JSX {
   // Utility type to allow reactive function props
   type MaybeReactive<T> = T | (() => T);
 
+  // Type for class/className object notation
+  type ClassNameValue = string | Record<string, boolean>;
+
+  // Type for style object notation
+  type StyleValue = string | Partial<CSSStyleDeclaration>;
+
   // Base attributes
   interface HTMLAttributes<T = HTMLElement> extends AriaAttributes, DOMAttributes<T> {
     // Standard HTML attributes
     accesskey?: MaybeReactive<string>;
-    class?: MaybeReactive<string>;
-    className?: MaybeReactive<string>;
+    class?: MaybeReactive<ClassNameValue>;
+    className?: MaybeReactive<ClassNameValue>;
     contenteditable?: MaybeReactive<boolean | "true" | "false" | "inherit">;
     contextmenu?: MaybeReactive<string>;
     dir?: MaybeReactive<"ltr" | "rtl" | "auto">;
@@ -194,7 +211,7 @@ export namespace JSX {
     id?: MaybeReactive<string>;
     lang?: MaybeReactive<string>;
     spellcheck?: MaybeReactive<boolean | "true" | "false">;
-    style?: MaybeReactive<string | Partial<CSSStyleDeclaration>>;
+    style?: MaybeReactive<StyleValue>;
     tabindex?: MaybeReactive<number | string>;
     title?: MaybeReactive<string>;
     translate?: MaybeReactive<"yes" | "no">;

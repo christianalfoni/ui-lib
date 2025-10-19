@@ -11,5 +11,5 @@ export { setProp, isEventProp, createRegion, type Props } from "./dom";
 // JSX and rendering
 export { h, render, type Child, type Key } from "./jsx";
 
-// JSX types
-export { JSX } from "./jsx-runtime";
+// JSX types and Fragment
+export { JSX, Fragment } from "./jsx-runtime";

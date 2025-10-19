@@ -3,6 +3,7 @@
  */
 
 import { autorun } from "./createState";
+import classNames from "classnames";
 
 export type Props = Record<string, any> & { children?: any };
 
@@ -63,16 +64,23 @@ export function setProp(el: HTMLElement, key: string, value: any): void {
 function applyProp(el: HTMLElement, key: string, value: any): void {
   if (value == null) return;
 
-  if (key === "className") {
-    el.setAttribute("class", value);
+  if (key === "className" || key === "class") {
+    // Handle object notation: { 'class-name': boolean }
+    if (typeof value === "object" && !Array.isArray(value)) {
+      el.setAttribute("class", classNames(value));
+    } else {
+      el.setAttribute("class", String(value));
+    }
     return;
   }
 
-  // Handle style specially - always use cssText or setAttribute
+  // Handle style specially - support object notation
   if (key === "style") {
     if (typeof value === "string") {
       el.setAttribute("style", value);
-    } else {
+    } else if (typeof value === "object") {
+      // Clear existing styles first
+      el.setAttribute("style", "");
       Object.assign(el.style, value);
     }
     return;
@@ -91,24 +99,20 @@ function applyProp(el: HTMLElement, key: string, value: any): void {
 }
 
 /**
- * Creates a region in the DOM with start/end anchors for dynamic content
+ * Creates a reactive region in the DOM with start/end anchors for dynamic content
  */
 export function createRegion(parent: Node) {
-  const start = document.createComment("scope-start");
-  const end = document.createComment("scope-end");
+  const start = document.createComment("reactive-scope");
+  const end = document.createComment("/reactive-scope");
   parent.appendChild(start);
   parent.appendChild(end);
 
   const cleanups: (() => void)[] = [];
 
-  function clearAll() {
-    // Run all cleanup functions
-    for (const cleanup of cleanups) {
-      cleanup();
-    }
-    cleanups.length = 0;
-
-    // Remove all DOM nodes
+  function clearContent() {
+    // Remove all DOM nodes WITHOUT running cleanup functions
+    // This is used during reactive updates where we're replacing content
+    // but the autorun should stay alive
     let n = start.nextSibling;
     while (n && n !== end) {
       const next = n.nextSibling;
@@ -119,6 +123,18 @@ export function createRegion(parent: Node) {
     }
   }
 
+  function clearAll() {
+    // Remove all DOM nodes AND run cleanup functions
+    // This is used when the region itself is being unmounted
+    clearContent();
+
+    // Run all cleanup functions (including autorun disposal)
+    for (const cleanup of cleanups) {
+      cleanup();
+    }
+    cleanups.length = 0;
+  }
+
   function insertBeforeRef(n: Node, ref: Node | null) {
     end.parentNode!.insertBefore(n, ref ?? end);
   }
@@ -127,7 +143,7 @@ export function createRegion(parent: Node) {
     cleanups.push(fn);
   }
 
-  return { start, end, clearAll, insertBeforeRef, addCleanup };
+  return { start, end, clearAll, clearContent, insertBeforeRef, addCleanup };
 }
 
 /**
