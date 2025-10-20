@@ -2,8 +2,8 @@
  * JSX factory, render, and child handling
  */
 
-import { autorun } from "./createState";
-import { setProp, createRegion, type Props } from "./dom";
+import { autorun, runWithMemo } from "./reactivity";
+import { setProp, createRegion, enterLifecycleScope, exitLifecycleScope, type Props } from "./dom";
 
 export type Key = string | number;
 
@@ -34,7 +34,36 @@ export function createElement(type: any, props: Record<string, any>, children: C
 
   if (typeof type === "function") {
     // Components run once, return a Node (or nodes via nested scopes)
-    const result = type({ ...rest, children });
+    // Enter lifecycle scope to track onMount/onCleanup calls
+    enterLifecycleScope();
+    let result;
+    try {
+      result = type({ ...rest, children });
+    } finally {
+      // Exit lifecycle scope and collect all registered callbacks
+      const { mounts, cleanups } = exitLifecycleScope();
+
+      // Attach lifecycle callbacks to the returned node
+      if (result instanceof Node) {
+        if (cleanups.length > 0) {
+          let cleanupFns = (result as any).__componentCleanups;
+          if (!cleanupFns) {
+            cleanupFns = [];
+            (result as any).__componentCleanups = cleanupFns;
+          }
+          cleanupFns.push(...cleanups);
+        }
+
+        if (mounts.length > 0) {
+          let mountFns = (result as any).__mountCallbacks;
+          if (!mountFns) {
+            mountFns = [];
+            (result as any).__mountCallbacks = mountFns;
+          }
+          mountFns.push(...mounts);
+        }
+      }
+    }
 
     // If component returns a function, treat it as a reactive component
     // The function will be handled by appendChild as a reactive child
@@ -79,7 +108,36 @@ function evaluateKeyedItem(item: KeyedItem): Node {
 
   if (typeof type === "function") {
     // Components run once, return a Node (or nodes via nested scopes)
-    const result = type({ ...props, children });
+    // Enter lifecycle scope to track onMount/onCleanup calls
+    enterLifecycleScope();
+    let result;
+    try {
+      result = type({ ...props, children });
+    } finally {
+      // Exit lifecycle scope and collect all registered callbacks
+      const { mounts, cleanups } = exitLifecycleScope();
+
+      // Attach lifecycle callbacks to the returned node
+      if (result instanceof Node) {
+        if (cleanups.length > 0) {
+          let cleanupFns = (result as any).__componentCleanups;
+          if (!cleanupFns) {
+            cleanupFns = [];
+            (result as any).__componentCleanups = cleanupFns;
+          }
+          cleanupFns.push(...cleanups);
+        }
+
+        if (mounts.length > 0) {
+          let mountFns = (result as any).__mountCallbacks;
+          if (!mountFns) {
+            mountFns = [];
+            (result as any).__mountCallbacks = mountFns;
+          }
+          mountFns.push(...mounts);
+        }
+      }
+    }
 
     // If component returns a function, treat it as a reactive component
     // The function will be handled by appendChild as a reactive child
@@ -116,6 +174,15 @@ export function render(node: Node | KeyedItem | (() => any), container: Element)
 }
 
 /**
+ * Helper to normalize any value to a Node
+ */
+function normalizeToNode(item: any): Node {
+  if (isKeyedItem(item)) return evaluateKeyedItem(item);
+  if (item instanceof Node) return item;
+  return document.createTextNode(String(item));
+}
+
+/**
  * Appends a child (with support for functions, arrays, and keyed elements)
  */
 function appendChild(parent: Node, child: Child): void {
@@ -124,8 +191,6 @@ function appendChild(parent: Node, child: Child): void {
   // Function child => reactive region with array support
   if (typeof child === "function") {
     const region = createRegion(parent);
-    // Track current mode
-    let mode: "none" | "single" | "array" = "none";
     let singleNode: Node | null = null;
     let arrayNodes: Node[] = []; // current nodes (keyed or not)
 
@@ -133,86 +198,74 @@ function appendChild(parent: Node, child: Child): void {
       // IMPORTANT: Don't register the autorun's dispose with the region's cleanup
       // The autorun manages its own lifecycle independently
       // Only clean up DOM nodes and their associated listeners
-      let out = (child as () => any)();
+      let out = runWithMemo(child as () => any);
 
-      // Normalize arrays produced by nested maps, etc.
+      // Flatten nested arrays (produced by .map, nested expressions, etc.)
+      // This recursively walks the tree structure and collects all leaf values
+      // Example: [[node1, [node2]], node3] => [node1, node2, node3]
       const flatten = (x: any, acc: any[]) => {
         if (x == null || x === false) return;
         if (Array.isArray(x)) {
           for (const i of x) flatten(i, acc);
           return;
         }
-        if (isKeyedItem(x)) {
-          acc.push(x);
-          return;
-        }
-        if (x instanceof Node) {
-          acc.push(x);
-          return;
-        }
-        acc.push(document.createTextNode(String(x)));
+        // Keep KeyedItems and Nodes as-is for processing later
+        acc.push(x);
       };
 
-      // null/false -> clear
+      // null/false -> clear everything
       if (out == null || out === false) {
-        if (mode !== "none") {
+        if (singleNode !== null || arrayNodes.length > 0) {
           region.clearContent();
           singleNode = null;
           arrayNodes = [];
-          mode = "none";
         }
         return;
       }
 
       // Single node/text
       if (!Array.isArray(out)) {
-        let node: Node;
-        if (isKeyedItem(out)) {
-          node = evaluateKeyedItem(out);
-        } else if (out instanceof Node) {
-          node = out;
-        } else {
-          node = document.createTextNode(String(out));
-        }
-        if (mode === "single" && singleNode === node) return; // nothing
+        const node = normalizeToNode(out);
+        if (singleNode === node) return; // nothing changed
         region.clearContent();
         region.insertBeforeRef(node, null);
+        callMountCallbacks(node);
         singleNode = node;
         arrayNodes = [];
-        mode = "single";
         return;
       }
 
-      // Array case
+      // Array case - flatten nested structures first
       const flattened: any[] = [];
       flatten(out, flattened);
 
-      // Check if we have KeyedItems (delay evaluation) or regular nodes
-      const allKeyed = flattened.length === 0 ? false : flattened.every(isKeyedItem);
+      // Check if we have KeyedItems (for efficient diffing) or regular nodes
+      const allKeyed = flattened.length > 0 && flattened.every(isKeyedItem);
 
       if (!allKeyed) {
-        // Replace everything - either non-keyed or mixed
-        // Evaluate any KeyedItems that slipped through
-        const nodes: Node[] = [];
-        for (const item of flattened) {
-          if (isKeyedItem(item)) {
-            nodes.push(evaluateKeyedItem(item));
-          } else if (item instanceof Node) {
-            nodes.push(item);
-          } else {
-            nodes.push(document.createTextNode(String(item)));
-          }
-        }
+        // Non-keyed or mixed array: replace everything
+        const nodes = flattened.map(normalizeToNode);
         region.clearContent();
-        for (const n of nodes) region.insertBeforeRef(n, null);
+        for (const n of nodes) {
+          region.insertBeforeRef(n, null);
+          callMountCallbacks(n);
+        }
         arrayNodes = nodes;
         singleNode = null;
-        mode = "array";
         return;
       }
 
       // Keyed diff - items are KeyedItems, evaluate only when needed
       const keyedItems = flattened as KeyedItem[];
+
+      // Early exit: if keys haven't changed, do nothing
+      if (arrayNodes.length === keyedItems.length) {
+        const unchanged = keyedItems.every((item, i) =>
+          (arrayNodes[i] as any).__key === item.key
+        );
+        if (unchanged) return;
+      }
+
       const oldByKey = new Map<Key, Node>();
       for (const n of arrayNodes) oldByKey.set((n as any).__key, n);
 
@@ -228,27 +281,31 @@ function appendChild(parent: Node, child: Child): void {
       }
 
       // Second pass: reorder/insert nodes from end to start
-      let ref: Node | null = region.end; // insert before this; starts at tail
+      // We iterate backwards so each node can be positioned relative to the previous one
+      // This avoids having to recalculate positions as we insert/move nodes
+      const parentNode = region.end.parentNode!;
+      let insertBeforeRef: Node | null = region.end; // starts at tail, works backward
+
       for (let i = keyedItems.length - 1; i >= 0; i--) {
         const k = newKeys[i];
         const existing = oldByKey.get(k);
         if (existing) {
-          // Reuse existing node - don't evaluate the component!
-          // Move existing before current ref if needed
-          if (existing.nextSibling !== ref) {
-            // Use parent's insertBefore directly to move the node
-            region.end.parentNode!.insertBefore(existing, ref);
+          // Reuse existing node - don't re-evaluate the component!
+          // Move existing node before current reference if needed
+          if (existing.nextSibling !== insertBeforeRef) {
+            parentNode.insertBefore(existing, insertBeforeRef);
           }
-          ref = existing;
+          insertBeforeRef = existing;
         } else {
           // New key: evaluate the KeyedItem NOW to create the node
           const newNode = evaluateKeyedItem(keyedItems[i]);
-          region.insertBeforeRef(newNode, ref);
-          ref = newNode;
+          region.insertBeforeRef(newNode, insertBeforeRef);
+          callMountCallbacks(newNode);
+          insertBeforeRef = newNode;
         }
       }
 
-      // Recompute by scanning siblings between start/end
+      // Rebuild arrayNodes by scanning siblings between region markers
       const ordered: Node[] = [];
       let cur = region.start.nextSibling;
       while (cur && cur !== region.end) {
@@ -257,7 +314,6 @@ function appendChild(parent: Node, child: Child): void {
       }
       arrayNodes = ordered;
       singleNode = null;
-      mode = "array";
     });
 
     // Register the autorun disposal to run when the region is actually unmounted
@@ -274,7 +330,30 @@ function appendChild(parent: Node, child: Child): void {
 
   if (child instanceof Node) {
     parent.appendChild(child);
+    // Call mount callbacks after insertion
+    callMountCallbacks(child);
     return;
   }
   parent.appendChild(document.createTextNode(String(child)));
+}
+
+/**
+ * Recursively calls mount callbacks on a node and its children after DOM insertion
+ */
+function callMountCallbacks(node: Node): void {
+  if (node instanceof HTMLElement) {
+    const mountCallbacks = (node as any).__mountCallbacks;
+    if (mountCallbacks) {
+      for (const callback of mountCallbacks) {
+        callback();
+      }
+      // Clear the callbacks after calling them once
+      delete (node as any).__mountCallbacks;
+    }
+
+    // Recursively call mount callbacks on child nodes
+    for (let i = 0; i < node.childNodes.length; i++) {
+      callMountCallbacks(node.childNodes[i]);
+    }
+  }
 }

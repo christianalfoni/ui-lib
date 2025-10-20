@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createState, autorun } from './createState';
+import { createState, autorun } from './reactivity';
 
 describe('createState', () => {
   describe('basic reactivity', () => {

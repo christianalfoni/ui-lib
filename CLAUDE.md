@@ -131,13 +131,13 @@ npm install <package> -w root
 
 The library implements a reactive UI system with automatic dependency tracking and proper cleanup. It consists of three main modules:
 
-#### 1. Reactive State ([createState.ts](packages/lib/src/createState.ts))
+#### 1. Reactive State ([reactivity.ts](packages/lib/src/reactivity.ts))
 - **`createState<T>(initial: T): T`** - Creates a reactive proxy that tracks property access
 - **`autorun(effect: Function): () => void`** - Runs an effect reactively, returns disposal function
 - **Proxy-based tracking** - Similar to MobX, automatically tracks which properties are accessed
 - **Subscription management** - Computations track their subscriptions for efficient cleanup
 
-**Example:**
+**autorun Example:**
 ```tsx
 const state = createState({ count: 0 })
 const dispose = autorun(() => {
@@ -147,12 +147,54 @@ state.count++ // Triggers the autorun
 dispose() // Cleans up subscription
 ```
 
+**Component Example with autorun:**
+```tsx
+function MyComponent() {
+  const state = createState({ count: 0 })
+
+  // You can use autorun directly in the component
+  // Just clean it up when the component unmounts
+  const dispose = autorun(() => {
+    console.log('Count changed:', state.count)
+  })
+
+  onCleanup(dispose)
+
+  return <div>{() => state.count}</div>
+}
+```
+
 #### 2. DOM Utilities ([dom.ts](packages/lib/src/dom.ts))
 - **`setProp(el, key, value)`** - Sets properties/attributes on DOM elements with reactive support
 - **`createRegion(parent)`** - Creates a dynamic content region with cleanup tracking
 - **`isEventProp(key)`** - Identifies event handler props (onClick, onSubmit, etc.)
+- **`onMount(callback: () => void)`** - Registers a callback to run after the component is mounted to the DOM
+- **`onCleanup(cleanup: () => void)`** - Registers a cleanup function to run when the component unmounts
 - **Event listener tracking** - Automatically tracks and removes event listeners on cleanup
 - **Reactive prop cleanup** - Function props create autoruns that are disposed when elements unmount
+
+**Lifecycle Callbacks:**
+```tsx
+function MyComponent() {
+  const state = createState({ count: 0 })
+
+  // Run code after the component is mounted to the DOM
+  onMount(() => {
+    console.log('Component mounted!')
+  })
+
+  // Set up an interval and clean it up when component unmounts
+  const interval = setInterval(() => {
+    state.count++
+  }, 1000)
+
+  onCleanup(() => {
+    clearInterval(interval)
+  })
+
+  return <div>{() => state.count}</div>
+}
+```
 
 **Regions:**
 Regions are bounded areas in the DOM (marked with comment anchors) that can be cleared and repopulated:
@@ -221,6 +263,8 @@ function MyComponent() {
 4. **Event handlers are NOT reactive** - `onClick={handler}` is a plain event listener
 5. **Arrays without keys replace all** - Non-keyed arrays are fully replaced on changes
 6. **Arrays with keys diff efficiently** - Keyed arrays only update changed elements
+7. **Use onMount for DOM manipulation** - Access and manipulate DOM elements after mounting
+8. **Use onCleanup for side effects** - Clean up intervals, subscriptions, and other side effects
 
 ### Testing and Development
 

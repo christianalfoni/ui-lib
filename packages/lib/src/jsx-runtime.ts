@@ -213,6 +213,9 @@ export namespace JSX {
 
   // Base attributes
   interface HTMLAttributes<T = HTMLElement> extends AriaAttributes, DOMAttributes<T> {
+    // Key for list diffing
+    key?: string | number;
+
     // Standard HTML attributes
     accesskey?: MaybeReactive<string>;
     class?: MaybeReactive<ClassNameValue>;

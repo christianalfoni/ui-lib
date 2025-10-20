@@ -2,10 +2,16 @@
  * DOM manipulation utilities and helpers
  */
 
-import { autorun } from "./createState";
+import { autorun, runWithMemo } from "./reactivity";
 import classNames from "classnames";
 
 export type Props = Record<string, any> & { children?: any };
+
+// Track the current mount callbacks during component instantiation
+let MOUNT_CALLBACKS: (() => void)[] | null = null;
+
+// Track the current cleanup registrations during component instantiation
+let CLEANUP_REGISTRATIONS: Array<() => void> | null = null;
 
 /**
  * Checks if a prop name is an event handler (e.g., onClick, onSubmit)
@@ -41,7 +47,7 @@ export function setProp(el: HTMLElement, key: string, value: any): void {
   // Handle function props for native elements (reactive scope)
   if (typeof value === "function") {
     const dispose = autorun(() => {
-      const result = value();
+      const result = runWithMemo(value);
       applyProp(el, key, result);
     });
 
@@ -147,10 +153,100 @@ export function createRegion(parent: Node) {
 }
 
 /**
+ * Registers a callback to run when the component is mounted (after DOM insertion).
+ * Must be called within a component function.
+ *
+ * @example
+ * function MyComponent() {
+ *   const inputRef = { current: null }
+ *
+ *   onMount(() => {
+ *     // Focus the input after it's been added to the DOM
+ *     inputRef.current?.focus()
+ *   })
+ *
+ *   return <input ref={(el) => inputRef.current = el} />
+ * }
+ */
+export function onMount(callback: () => void) {
+  if (!MOUNT_CALLBACKS) {
+    console.warn(
+      'onMount called outside of a component scope. ' +
+      'The callback will not be executed.'
+    );
+    return;
+  }
+
+  MOUNT_CALLBACKS.push(callback);
+}
+
+/**
+ * Registers a cleanup function to run when the component unmounts.
+ * Must be called within a component function.
+ *
+ * @example
+ * function MyComponent() {
+ *   const state = createState({ count: 0 })
+ *
+ *   const interval = setInterval(() => {
+ *     state.count++
+ *   }, 1000)
+ *
+ *   onCleanup(() => {
+ *     clearInterval(interval)
+ *   })
+ *
+ *   return <div>{() => state.count}</div>
+ * }
+ */
+export function onCleanup(cleanup: () => void) {
+  if (!CLEANUP_REGISTRATIONS) {
+    console.warn(
+      'onCleanup called outside of a component scope. ' +
+      'The cleanup function will not be registered.'
+    );
+    return;
+  }
+
+  CLEANUP_REGISTRATIONS.push(cleanup);
+}
+
+/**
+ * Enters a component lifecycle scope - sets up tracking for mount and cleanup callbacks.
+ * Must be called before component function execution.
+ * @internal
+ */
+export function enterLifecycleScope() {
+  MOUNT_CALLBACKS = [];
+  CLEANUP_REGISTRATIONS = [];
+}
+
+/**
+ * Exits the component lifecycle scope and returns mount callbacks and cleanup functions.
+ * Must be called after component function execution.
+ * @internal
+ */
+export function exitLifecycleScope(): { mounts: (() => void)[], cleanups: (() => void)[] } {
+  const mounts = MOUNT_CALLBACKS || [];
+  const cleanups = CLEANUP_REGISTRATIONS || [];
+  MOUNT_CALLBACKS = null;
+  CLEANUP_REGISTRATIONS = null;
+  return { mounts, cleanups };
+}
+
+/**
  * Cleans up any metadata attached to a node (like event listeners or keys)
  */
 function cleanupNode(node: Node) {
   if (node instanceof HTMLElement) {
+    // Run component cleanup functions (from onCleanup)
+    const componentCleanups = (node as any).__componentCleanups;
+    if (componentCleanups) {
+      for (const cleanup of componentCleanups) {
+        cleanup();
+      }
+    }
+
     // Dispose of reactive property subscriptions
     const disposals = (node as any).__disposals;
     if (disposals) {
@@ -176,5 +272,6 @@ function cleanupNode(node: Node) {
     delete (node as any).__key;
     delete (node as any).__listeners;
     delete (node as any).__disposals;
+    delete (node as any).__componentCleanups;
   }
 }

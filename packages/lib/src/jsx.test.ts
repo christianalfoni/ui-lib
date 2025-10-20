@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { h, render } from './jsx';
-import { createState } from './createState';
+import { createState } from './reactivity';
 
 describe('jsx', () => {
   let container: HTMLDivElement;
