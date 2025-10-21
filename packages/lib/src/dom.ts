@@ -3,15 +3,10 @@
  */
 
 import { autorun, runWithMemo } from "./reactivity";
+import { getCurrentInstance, getCurrentComponent, ReactiveComponent } from "./component";
 import classNames from "classnames";
 
 export type Props = Record<string, any> & { children?: any };
-
-// Track the current mount callbacks during component instantiation
-let MOUNT_CALLBACKS: (() => void)[] | null = null;
-
-// Track the current cleanup registrations during component instantiation
-let CLEANUP_REGISTRATIONS: Array<() => void> | null = null;
 
 /**
  * Checks if a prop name is an event handler (e.g., onClick, onSubmit)
@@ -33,13 +28,11 @@ export function setProp(el: HTMLElement, key: string, value: any): void {
       const eventName = key.slice(2).toLowerCase();
       el.addEventListener(eventName, value);
 
-      // Track listener for cleanup
-      let listeners = (el as any).__listeners;
-      if (!listeners) {
-        listeners = [];
-        (el as any).__listeners = listeners;
-      }
-      listeners.push({ eventName, handler: value });
+      // Register cleanup with current instance (ReactiveComponent OR ReactiveChild)
+      const instance = getCurrentInstance();
+      instance?.cleanups.push(() => {
+        el.removeEventListener(eventName, value);
+      });
     }
     return;
   }
@@ -51,13 +44,12 @@ export function setProp(el: HTMLElement, key: string, value: any): void {
       applyProp(el, key, result);
     });
 
-    // Track disposal function for cleanup
-    let disposals = (el as any).__disposals;
-    if (!disposals) {
-      disposals = [];
-      (el as any).__disposals = disposals;
+    // Register disposal with current instance
+    // Only ReactiveComponent has autorunDisposals
+    const instance = getCurrentInstance();
+    if (instance instanceof ReactiveComponent) {
+      instance.autorunDisposals.push(dispose);
     }
-    disposals.push(dispose);
     return;
   }
 
@@ -113,43 +105,28 @@ export function createRegion(parent: Node) {
   parent.appendChild(start);
   parent.appendChild(end);
 
-  const cleanups: (() => void)[] = [];
+  // No more cleanup array! Component instance manages autoruns
 
   function clearContent() {
-    // Remove all DOM nodes WITHOUT running cleanup functions
-    // This is used during reactive updates where we're replacing content
-    // but the autorun should stay alive
+    // Just remove DOM nodes, no cleanup needed
     let n = start.nextSibling;
     while (n && n !== end) {
       const next = n.nextSibling;
-      // Clean up any event listeners or metadata attached to the node
-      cleanupNode(n);
       n.parentNode!.removeChild(n);
       n = next;
     }
   }
 
   function clearAll() {
-    // Remove all DOM nodes AND run cleanup functions
-    // This is used when the region itself is being unmounted
+    // Same as clearContent - component disposal handles autoruns
     clearContent();
-
-    // Run all cleanup functions (including autorun disposal)
-    for (const cleanup of cleanups) {
-      cleanup();
-    }
-    cleanups.length = 0;
   }
 
   function insertBeforeRef(n: Node, ref: Node | null) {
     end.parentNode!.insertBefore(n, ref ?? end);
   }
 
-  function addCleanup(fn: () => void) {
-    cleanups.push(fn);
-  }
-
-  return { start, end, clearAll, clearContent, insertBeforeRef, addCleanup };
+  return { start, end, clearAll, clearContent, insertBeforeRef };
 }
 
 /**
@@ -169,15 +146,12 @@ export function createRegion(parent: Node) {
  * }
  */
 export function onMount(callback: () => void) {
-  if (!MOUNT_CALLBACKS) {
-    console.warn(
-      'onMount called outside of a component scope. ' +
-      'The callback will not be executed.'
-    );
+  const component = getCurrentComponent();
+  if (!component) {
+    console.warn("onMount called outside component scope");
     return;
   }
-
-  MOUNT_CALLBACKS.push(callback);
+  component.mountCallbacks.push(callback);
 }
 
 /**
@@ -200,78 +174,10 @@ export function onMount(callback: () => void) {
  * }
  */
 export function onCleanup(cleanup: () => void) {
-  if (!CLEANUP_REGISTRATIONS) {
-    console.warn(
-      'onCleanup called outside of a component scope. ' +
-      'The cleanup function will not be registered.'
-    );
+  const component = getCurrentComponent();
+  if (!component) {
+    console.warn("onCleanup called outside component scope");
     return;
   }
-
-  CLEANUP_REGISTRATIONS.push(cleanup);
-}
-
-/**
- * Enters a component lifecycle scope - sets up tracking for mount and cleanup callbacks.
- * Must be called before component function execution.
- * @internal
- */
-export function enterLifecycleScope() {
-  MOUNT_CALLBACKS = [];
-  CLEANUP_REGISTRATIONS = [];
-}
-
-/**
- * Exits the component lifecycle scope and returns mount callbacks and cleanup functions.
- * Must be called after component function execution.
- * @internal
- */
-export function exitLifecycleScope(): { mounts: (() => void)[], cleanups: (() => void)[] } {
-  const mounts = MOUNT_CALLBACKS || [];
-  const cleanups = CLEANUP_REGISTRATIONS || [];
-  MOUNT_CALLBACKS = null;
-  CLEANUP_REGISTRATIONS = null;
-  return { mounts, cleanups };
-}
-
-/**
- * Cleans up any metadata attached to a node (like event listeners or keys)
- */
-function cleanupNode(node: Node) {
-  if (node instanceof HTMLElement) {
-    // Run component cleanup functions (from onCleanup)
-    const componentCleanups = (node as any).__componentCleanups;
-    if (componentCleanups) {
-      for (const cleanup of componentCleanups) {
-        cleanup();
-      }
-    }
-
-    // Dispose of reactive property subscriptions
-    const disposals = (node as any).__disposals;
-    if (disposals) {
-      for (const dispose of disposals) {
-        dispose();
-      }
-    }
-
-    // Remove tracked event listeners
-    const listeners = (node as any).__listeners;
-    if (listeners) {
-      for (const { eventName, handler } of listeners) {
-        node.removeEventListener(eventName, handler);
-      }
-    }
-
-    // Recursively clean up child nodes
-    for (let i = 0; i < node.childNodes.length; i++) {
-      cleanupNode(node.childNodes[i]);
-    }
-
-    // Remove reference to any internal metadata
-    delete (node as any).__key;
-    delete (node as any).__listeners;
-    delete (node as any).__disposals;
-    delete (node as any).__componentCleanups;
-  }
+  component.cleanups.push(cleanup);
 }
