@@ -8,7 +8,7 @@
  * 1. OBSERVATION SCOPE (CURRENT_OBSERVATION)
  *    - Tracks which reactive state properties are accessed during effect execution
  *    - Set by autorun() when running an effect function
- *    - Used by reactive proxies to subscribe the current computation to properties
+ *    - Used by reactive proxies to subscribe the current reactive scope to properties
  *    - Analogous to React's dependency tracking in useEffect
  *
  * 2. COMPONENT SCOPE (CURRENT_COMPONENT)
@@ -19,7 +19,7 @@
  */
 
 export type Cleanup = () => void;
-export type Computation = { run: () => void; cleanup?: Cleanup };
+export type ReactiveScope = { run: () => void; cleanup?: Cleanup };
 
 // ============================================================================
 // GLOBAL SCOPE TRACKING
@@ -27,15 +27,9 @@ export type Computation = { run: () => void; cleanup?: Cleanup };
 
 /**
  * Current observation scope - tracks reactive state accesses during effect execution
- * When set, any property accesses on reactive state will subscribe this computation
+ * When set, any property accesses on reactive state will subscribe this reactive scope
  */
-let CURRENT_OBSERVATION: Computation | null = null;
-
-/**
- * Current component scope - tracks effect registrations during component instantiation
- * When set, any createEffect calls will register their cleanup with this array
- */
-let CURRENT_COMPONENT: (() => void)[] | null = null;
+let CURRENT_OBSERVATION: ReactiveScope | null = null;
 
 // ============================================================================
 // REACTIVITY INTERNALS
@@ -51,11 +45,11 @@ const PENDING_NOTIFICATIONS = new Set<() => void>();
  */
 let CHANGE_COUNTER = 0;
 
-// Track which properties are accessed for each computation
-const propertyListeners = new WeakMap<object, Map<string | symbol, Set<Computation>>>();
+// Track which properties are accessed for each reactive scope
+const propertyListeners = new WeakMap<object, Map<string | symbol, Set<ReactiveScope>>>();
 
-// Track all subscriptions for each computation (for cleanup)
-const computationSubscriptions = new WeakMap<Computation, Set<{ obj: object; prop: string | symbol }>>();
+// Track all subscriptions for each reactive scope (for cleanup)
+const reactiveScopeSubscriptions = new WeakMap<ReactiveScope, Set<{ obj: object; prop: string | symbol }>>();
 
 // Track proxies to avoid creating duplicates
 const proxyCache = new WeakMap<object, any>();
@@ -66,6 +60,17 @@ const proxyCache = new WeakMap<object, any>();
 const ARRAY_MUTATORS = new Set([
   'push', 'pop', 'shift', 'unshift', 'splice', 'sort', 'reverse', 'fill', 'copyWithin'
 ]);
+
+/**
+ * Flushes all pending notifications - used internally by batch() and array mutators
+ * Increments the change counter and runs all queued reactive scopes
+ */
+function flushNotifications() {
+  CHANGE_COUNTER++;
+  const pending = Array.from(PENDING_NOTIFICATIONS);
+  PENDING_NOTIFICATIONS.clear();
+  pending.forEach(fn => fn());
+}
 
 /**
  * Batches multiple state updates to trigger only one reaction
@@ -81,12 +86,7 @@ export function batch<T>(fn: () => T): T {
 
     // If we're not nested in another batch, flush pending notifications
     if (!wasBatching) {
-      // Increment change counter for new reactive cycle
-      CHANGE_COUNTER++;
-
-      const pending = Array.from(PENDING_NOTIFICATIONS);
-      PENDING_NOTIFICATIONS.clear();
-      pending.forEach(fn => fn());
+      flushNotifications();
     }
   }
 }
@@ -102,14 +102,17 @@ function createReactiveProxy<T extends object>(target: T): T {
 
   const proxy = new Proxy(target, {
     get(obj, prop) {
-      // Track property access in the current observation scope
+      // DEPENDENCY TRACKING: When a property is accessed during an autorun,
+      // subscribe the reactive scope to that property so it re-runs on changes
       if (CURRENT_OBSERVATION && typeof prop !== 'symbol' && prop !== 'constructor') {
+        // Get or create the property listeners map for this object
         let propsMap = propertyListeners.get(obj);
         if (!propsMap) {
           propsMap = new Map();
           propertyListeners.set(obj, propsMap);
         }
 
+        // Get or create the set of listeners for this property
         let listeners = propsMap.get(prop);
         if (!listeners) {
           listeners = new Set();
@@ -117,11 +120,12 @@ function createReactiveProxy<T extends object>(target: T): T {
         }
         listeners.add(CURRENT_OBSERVATION);
 
-        // Track this subscription for the computation
-        let subs = computationSubscriptions.get(CURRENT_OBSERVATION);
+        // SUBSCRIPTION TRACKING: Track this subscription on the reactive scope
+        // for cleanup when the scope is disposed (prevents memory leaks)
+        let subs = reactiveScopeSubscriptions.get(CURRENT_OBSERVATION);
         if (!subs) {
           subs = new Set();
-          computationSubscriptions.set(CURRENT_OBSERVATION, subs);
+          reactiveScopeSubscriptions.set(CURRENT_OBSERVATION, subs);
         }
         // Check if we already have this subscription to avoid duplicates
         let found = false;
@@ -150,19 +154,13 @@ function createReactiveProxy<T extends object>(target: T): T {
           // Restore batching state
           BATCHING = wasBatching;
 
-          // Trigger all listeners for this array
+          // Trigger all listeners for this array and its length property
           notifyListeners(obj, prop);
-          // Also trigger length listeners since array mutations change length
           notifyListeners(obj, 'length');
 
           // If we're not nested in another batch, flush pending notifications
           if (!wasBatching) {
-            // Increment change counter for new reactive cycle
-            CHANGE_COUNTER++;
-
-            const pending = Array.from(PENDING_NOTIFICATIONS);
-            PENDING_NOTIFICATIONS.clear();
-            pending.forEach(fn => fn());
+            flushNotifications();
           }
 
           return result;
@@ -220,11 +218,11 @@ function notifyListeners(obj: object, prop: string | symbol) {
   // Copy listeners to avoid issues if set is modified during iteration
   const listenersArray = [...listeners];
 
-  // Run all computations that depend on this property
-  for (const computation of listenersArray) {
-    computation.cleanup?.();
-    computation.cleanup = undefined;
-    computation.run();
+  // Run all reactive scopes that depend on this property
+  for (const scope of listenersArray) {
+    scope.cleanup?.();
+    scope.cleanup = undefined;
+    scope.run();
   }
 }
 
@@ -239,31 +237,31 @@ export function createState<T extends object>(initial: T): T {
 
 /**
  * Runs an effect function reactively, re-executing when dependencies change
- * Returns a dispose function that cleans up the computation and removes all subscriptions
+ * Returns a dispose function that cleans up the reactive scope and removes all subscriptions
  *
  * Supports memoization: if the effect returns a value and has been called in the current
  * change cycle, subsequent calls will use the cached value instead of re-running
  */
 export function autorun(effect: (onCleanup: (fn: () => void) => void) => void) {
-  const comp: Computation = {
+  const scope: ReactiveScope = {
     run() {
       // Enter observation scope - track all reactive state accesses
       const prevObservation = CURRENT_OBSERVATION;
-      CURRENT_OBSERVATION = comp;
+      CURRENT_OBSERVATION = scope;
       try {
-        effect(fn => { comp.cleanup = fn; });
+        effect(fn => { scope.cleanup = fn; });
       } finally {
         CURRENT_OBSERVATION = prevObservation;
       }
     }
   };
-  comp.run();
+  scope.run();
 
   // Return disposal function that both cleans up and unsubscribes
   return () => {
-    comp.cleanup?.();
-    // Remove this computation from all property listeners
-    clearComputationSubscriptions(comp);
+    scope.cleanup?.();
+    // Remove this reactive scope from all property listeners
+    clearReactiveScopeSubscriptions(scope);
   };
 }
 
@@ -291,38 +289,14 @@ export function runWithMemo<T>(fn: () => T): T {
   return value;
 }
 
-// ============================================================================
-// COMPONENT SCOPE API (INTERNAL)
-// ============================================================================
-
 /**
- * Enters a component scope - sets up tracking for cleanup registrations
- * Must be called before component function execution
- * @internal
+ * Clears a reactive scope's subscriptions from property listeners
  */
-export function enterComponentScope() {
-  CURRENT_COMPONENT = [];
-}
-
-/**
- * Exits the component scope and returns all registered cleanups
- * Must be called after component function execution
- * @internal
- */
-export function exitComponentScope(): (() => void)[] {
-  const cleanups = CURRENT_COMPONENT || [];
-  CURRENT_COMPONENT = null;
-  return cleanups;
-}
-
-/**
- * Clears a computation's subscriptions from property listeners
- */
-function clearComputationSubscriptions(comp: Computation) {
-  const subs = computationSubscriptions.get(comp);
+function clearReactiveScopeSubscriptions(scope: ReactiveScope) {
+  const subs = reactiveScopeSubscriptions.get(scope);
   if (!subs) return;
 
-  // Remove this computation from each subscribed property
+  // Remove this reactive scope from each subscribed property
   for (const { obj, prop } of subs) {
     const propsMap = propertyListeners.get(obj);
     if (!propsMap) continue;
@@ -330,9 +304,9 @@ function clearComputationSubscriptions(comp: Computation) {
     const listeners = propsMap.get(prop);
     if (!listeners) continue;
 
-    listeners.delete(comp);
+    listeners.delete(scope);
   }
 
-  // Clear the subscriptions for this computation
-  computationSubscriptions.delete(comp);
+  // Clear the subscriptions for this reactive scope
+  reactiveScopeSubscriptions.delete(scope);
 }

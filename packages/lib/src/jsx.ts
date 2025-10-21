@@ -37,6 +37,41 @@ export type Child =
   | ReactiveComponent;
 
 /**
+ * Internal function that evaluates a component function
+ * Shared logic for both createElement and evaluateKeyedItem
+ */
+function evaluateComponentFunction(
+  type: Function,
+  props: Record<string, any>,
+  children: Child[],
+  parentInstance: ReactiveComponent | ReactiveChild | null
+): ReactiveComponent {
+  const component = enterComponentScope(parentInstance);
+
+  let result;
+  try {
+    result = type({ ...props, children });
+    // Set domRoot based on what the component returns
+    if (result instanceof Node) {
+      component.domRoot = result;
+    } else if (result instanceof ReactiveComponent) {
+      component.domRoot = result.domRoot;
+    } else {
+      component.domRoot = null;
+    }
+  } finally {
+    exitComponentScope();
+  }
+
+  // If component returns a function (reactive component), handle it
+  if (typeof result === "function") {
+    return result as any;
+  }
+
+  return component;
+}
+
+/**
  * Internal function that handles element creation
  * Used by both h() and jsx() runtimes
  */
@@ -56,31 +91,8 @@ export function createElement(
   }
 
   if (typeof type === "function") {
-    // Create component instance and enter scope
     const parentInstance = getCurrentInstance();
-    const component = enterComponentScope(parentInstance);
-
-    let result;
-    try {
-      result = type({ ...rest, children });
-      // Set domRoot based on what the component returns
-      if (result instanceof Node) {
-        component.domRoot = result;
-      } else if (result instanceof ReactiveComponent) {
-        component.domRoot = result.domRoot;
-      } else {
-        component.domRoot = null;
-      }
-    } finally {
-      exitComponentScope();
-    }
-
-    // If component returns a function (reactive component), handle it
-    if (typeof result === "function") {
-      return result as any;
-    }
-
-    return component;
+    return evaluateComponentFunction(type, rest, children, parentInstance);
   }
 
   // Intrinsic element
@@ -127,26 +139,7 @@ function evaluateKeyedItem(item: KeyedItem): {
 
   if (typeof type === "function") {
     const parentInstance = getCurrentInstance();
-    const component = enterComponentScope(parentInstance);
-
-    let result;
-    try {
-      result = type({ ...props, children });
-      // Set domRoot based on what the component returns
-      if (result instanceof Node) {
-        component.domRoot = result;
-      } else if (result instanceof ReactiveComponent) {
-        component.domRoot = result.domRoot;
-      } else {
-        component.domRoot = null;
-      }
-    } finally {
-      exitComponentScope();
-    }
-
-    if (typeof result === "function") {
-      result = result as any;
-    }
+    const component = evaluateComponentFunction(type, props, children, parentInstance);
 
     if (!component.domRoot) {
       throw new Error("Keyed component did not return a valid DOM node");
@@ -242,13 +235,17 @@ function appendChild(parent: Node, child: Child): void {
   // Function child => create ReactiveChild for reactive JSX child
   // This is ONLY for {() => ...} in JSX children, not for reactive props
   if (typeof child === "function") {
+    // Create a bounded region in the DOM for this reactive content
     const region = createRegion(parent);
     const parentInstance = getCurrentInstance();
     const reactiveChild = enterReactiveScope(parentInstance, region);
 
+    // Set up an autorun that re-evaluates whenever dependencies change
     const dispose = autorun(() => {
+      // Run the function with memoization to avoid redundant re-renders
       const out = runWithMemo(child as () => any);
 
+      // Helper to flatten nested arrays
       const flatten = (x: any, acc: any[]) => {
         if (x == null || x === false) return;
         if (Array.isArray(x)) {
@@ -258,7 +255,7 @@ function appendChild(parent: Node, child: Child): void {
         acc.push(x);
       };
 
-      // Dispose all current children before updating
+      // CLEANUP PHASE: Dispose all children from the previous evaluation cycle
       // This is safe because ReactiveComponents with ReactiveChild parents
       // do NOT auto-register during construction (see component.ts constructor).
       // Only children from the previous evaluation cycle are in this set.
@@ -267,13 +264,15 @@ function appendChild(parent: Node, child: Child): void {
       }
       reactiveChild.children.clear();
 
-      // null/false -> clear
+      // RENDER PHASE: Determine what to render
+
+      // Case 1: null/false -> clear all content
       if (out == null || out === false) {
         region.clearContent();
         return;
       }
 
-      // Single item
+      // Case 2: Single item (not an array)
       if (!Array.isArray(out)) {
         const { instance, node } = normalizeToInstanceAndNode(out);
         region.clearContent();
@@ -287,14 +286,21 @@ function appendChild(parent: Node, child: Child): void {
         return;
       }
 
-      // Array case
+      // Case 3: Array - flatten nested arrays first
       const flattened: any[] = [];
       flatten(out, flattened);
 
-      const allKeyed = flattened.length > 0 && flattened.every(isKeyedItem);
+      const hasKeyed = flattened.some(isKeyedItem);
+      const allKeyed = flattened.every(isKeyedItem);
 
+      // Validate: either all keyed or all non-keyed (no mixing)
+      if (hasKeyed && !allKeyed) {
+        throw new Error('Cannot mix keyed and non-keyed children in the same array');
+      }
+
+      // Case 3a: Non-keyed array -> replace all content
+      // This is the simple case: just clear everything and insert new items
       if (!allKeyed) {
-        // Non-keyed: replace all
         region.clearContent();
         for (const item of flattened) {
           const { instance, node } = normalizeToInstanceAndNode(item);
@@ -308,13 +314,28 @@ function appendChild(parent: Node, child: Child): void {
         return;
       }
 
-      // Keyed diff
+      // Case 3b: Keyed array -> efficient diffing algorithm
+      // This preserves existing DOM nodes and only updates what changed
       const keyedItems = flattened as KeyedItem[];
 
-      // Build old map from BOTH ReactiveComponents AND intrinsic DOM nodes with keys
+      // STEP 0: Remove any non-keyed DOM content from previous renders
+      // This handles the case where we're transitioning from non-keyed to keyed
+      let n = region.start.nextSibling;
+      while (n && n !== region.end) {
+        const next = n.nextSibling;
+        const key = (n as any).__key;
+        // If this node doesn't have a key, it's from a previous non-keyed render
+        if (key === undefined) {
+          n.parentNode?.removeChild(n);
+        }
+        n = next;
+      }
+
+      // STEP 1: Build a map of old (existing) keyed items
+      // We need to track BOTH ReactiveComponents AND intrinsic DOM nodes
       const oldByKey = new Map<Key, { instance: ReactiveComponent | null; node: Node }>();
 
-      // First, add ReactiveComponents from children set
+      // 1a. Add ReactiveComponents from the children set
       for (const childInstance of reactiveChild.children) {
         if (
           childInstance instanceof ReactiveComponent &&
@@ -327,39 +348,32 @@ function appendChild(parent: Node, child: Child): void {
         }
       }
 
-      // Second, scan DOM nodes in the region for keyed intrinsic elements
-      // Also collect non-keyed nodes to remove before keyed diffing
-      const nonKeyedNodesToRemove: Node[] = [];
-      let n = region.start.nextSibling;
+      // 1b. Scan DOM nodes in the region for keyed intrinsic elements
+      // (Intrinsic elements don't have component instances, only DOM nodes)
+      n = region.start.nextSibling;
       while (n && n !== region.end) {
         const key = (n as any).__key;
         if (key !== undefined && !oldByKey.has(key)) {
           // This is a keyed intrinsic element (no instance)
           oldByKey.set(key, { instance: null, node: n });
-        } else if (key === undefined) {
-          // This is a non-keyed node that needs to be removed
-          nonKeyedNodesToRemove.push(n);
         }
         n = n.nextSibling;
       }
 
-      // Remove all non-keyed nodes before performing keyed diff
-      for (const node of nonKeyedNodesToRemove) {
-        node.parentNode?.removeChild(node);
-      }
-
+      // STEP 2: Determine which keys are in the new array
       const newKeys = keyedItems.map((item) => item.key);
       const newKeySet = new Set(newKeys);
 
-      // Remove old keys
+      // STEP 3: Remove items that are no longer in the new array
       for (const [k, entry] of oldByKey) {
         if (!newKeySet.has(k)) {
-          // Dispose ReactiveComponent if it exists
+          // This key is gone - clean it up
           if (entry.instance) {
+            // Dispose ReactiveComponent (handles cleanup, event listeners, etc.)
             entry.instance.dispose();
           } else {
-            // For intrinsic elements, remove from DOM
-            // Note: Event listener cleanup is handled by the parent instance's cleanups
+            // For intrinsic elements, just remove from DOM
+            // Event listener cleanup is handled by the parent instance's cleanups
             // which were registered when setProp was called during element creation
             entry.node.parentNode?.removeChild(entry.node);
           }
@@ -367,7 +381,8 @@ function appendChild(parent: Node, child: Child): void {
         }
       }
 
-      // Reorder/insert
+      // STEP 4: Reorder/insert items to match the new array order
+      // We iterate backwards to maintain correct positioning relative to the end marker
       const parentNode = region.end.parentNode!;
       let insertBeforeRef: Node | null = region.end;
       const newChildren = new Set<ReactiveComponent>();
@@ -375,8 +390,9 @@ function appendChild(parent: Node, child: Child): void {
       for (let i = keyedItems.length - 1; i >= 0; i--) {
         const k = newKeys[i];
         const existing = oldByKey.get(k);
+
         if (existing) {
-          // Reuse existing node
+          // Reuse existing node - just reposition if needed
           if (existing.node.nextSibling !== insertBeforeRef) {
             parentNode.insertBefore(existing.node, insertBeforeRef);
           }
@@ -397,7 +413,8 @@ function appendChild(parent: Node, child: Child): void {
         }
       }
 
-      // Replace the children set with the new one
+      // STEP 5: Replace the children set with the new one
+      // Old children that weren't in newChildren were already disposed in step 3
       reactiveChild.children = newChildren;
     });
 

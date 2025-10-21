@@ -47,12 +47,12 @@ const state = createState({ count: 0 });
 
 // When you read state.count inside a reactive context:
 // 1. Proxy's get trap fires
-// 2. Current computation is subscribed to "count" property
+// 2. Current reactive scope is subscribed to "count" property
 // 3. Value is returned
 
 // When you write state.count++:
 // 1. Proxy's set trap fires
-// 2. All computations subscribed to "count" are re-run
+// 2. All reactive scopes subscribed to "count" are re-run
 // 3. DOM updates happen automatically
 ```
 
@@ -61,12 +61,14 @@ const state = createState({ count: 0 });
 The reactivity system uses two complementary global scope trackers:
 
 #### 1. Observation Scope (CURRENT_OBSERVATION)
+
 - Tracks which reactive state properties are accessed during effect execution
 - Set by `autorun()` when running an effect function
-- Used by reactive proxies to subscribe the current computation to properties
+- Used by reactive proxies to subscribe the current reactive scope to properties
 - Analogous to React's dependency tracking in useEffect
 
 #### 2. Component Scope (CURRENT_COMPONENT)
+
 - Tracks cleanup functions registered during component instantiation
 - Set by `enterComponentScope()` when a component function runs
 - Used by `onCleanup()` to register cleanup with the component
@@ -76,8 +78,8 @@ The reactivity system uses two complementary global scope trackers:
 
 The system maintains several WeakMaps for tracking dependencies:
 
-- **`propertyListeners`** - Maps objects to their properties, and properties to computations
-- **`computationSubscriptions`** - Maps computations to their subscribed properties (for cleanup)
+- **`propertyListeners`** - Maps objects to their properties, and properties to reactive scopes
+- **`reactiveScopeSubscriptions`** - Maps reactive scopes to their subscribed properties (for cleanup)
 - **`proxyCache`** - Caches proxies to avoid creating duplicates
 
 ### Array Reactivity
@@ -120,25 +122,22 @@ Represents user-defined function components:
 
 ```tsx
 class ReactiveComponent {
-  parent: ReactiveInstance | null
-  children: Set<ReactiveInstance>
-  cleanups: Array<() => void>
-  autorunDisposals: Array<() => void>
-  mountCallbacks: Array<() => void>
-  domRoot: Node | null
-  isDisposed: boolean
+  parent: ReactiveInstance | null;
+  children: Set<ReactiveInstance>;
+  cleanups: Array<() => void>;
+  autorunDisposals: Array<() => void>;
+  mountCallbacks: Array<() => void>;
+  domRoot: Node | null;
+  isDisposed: boolean;
 }
 ```
 
 **Responsibilities:**
+
 - Tracks children (both components and reactive scopes)
 - Manages lifecycle (mount callbacks, cleanup functions)
 - Owns cleanup responsibilities (event listeners, autoruns)
 - Disposes entire subtree recursively
-
-**Parent-Child Registration:**
-- Auto-registers with `ReactiveComponent` parents during construction
-- Does NOT auto-register with `ReactiveChild` parents (manual registration)
 
 ### ReactiveChild
 
@@ -146,24 +145,26 @@ Represents reactive scopes created by `{() => ...}` in JSX:
 
 ```tsx
 class ReactiveChild {
-  parent: ReactiveInstance | null
-  children: Set<ReactiveInstance>
-  cleanups: Array<() => void>
-  autorunDisposal: (() => void) | null
-  region: ReturnType<typeof createRegion>
-  isDisposed: boolean
+  parent: ReactiveInstance | null;
+  children: Set<ReactiveInstance>;
+  cleanups: Array<() => void>;
+  autorunDisposal: (() => void) | null;
+  region: ReturnType<typeof createRegion>;
+  isDisposed: boolean;
 }
 ```
 
 **Responsibilities:**
+
 - Only created for reactive JSX children, not for reactive props
 - Manages dynamic DOM content within comment-bounded regions
 - Provides cleanup context for intrinsic elements inside the scope
 - Handles smart diffing for keyed/non-keyed arrays
 
 **Key Distinction:**
-- Reactive **props** (e.g., `style={() => ...}`) register autoruns with the current component
-- Reactive **children** (e.g., `<div>{() => ...}</div>`) create a ReactiveChild scope with its own cleanup context
+
+- **Reactive props** (e.g., `style={() => ...}`) create reactive scopes registered with the current component
+- **Reactive children** (e.g., `<div>{() => ...}</div>`) create ReactiveChild instances with their own cleanup context and DOM regions
 
 ### Component Tree Structure
 
@@ -188,7 +189,7 @@ When a ReactiveComponent is created with another ReactiveComponent as parent, it
 
 ```tsx
 function Parent() {
-  return <Child />  // Child auto-registers with Parent
+  return <Child />; // Child auto-registers with Parent
 }
 ```
 
@@ -197,6 +198,7 @@ function Parent() {
 When a ReactiveComponent is created with a ReactiveChild as parent (inside a reactive function), it does NOT auto-register.
 
 **Why?** ReactiveChild runs an autorun that:
+
 1. Disposes all current children at the start of each evaluation
 2. Re-evaluates the function
 3. Adds the new children to the set
@@ -207,34 +209,60 @@ If components auto-registered during step 2, they would be in the children set a
 
 ## Observation Scopes
 
-Function children and props create "observation scopes" that automatically track dependencies.
+The library provides three reactive primitives built on top of reactive scopes:
 
-### Function Children
+### 1. Reactive Scope (Low-Level Primitive)
+
+The foundational building block created by `autorun()`. A reactive scope:
+- Tracks property accesses during execution
+- Automatically re-runs when dependencies change
+- Provides cleanup mechanism
+
+```tsx
+const state = createState({ count: 0 });
+const dispose = autorun(() => {
+  console.log('Count:', state.count); // Tracks access
+});
+state.count++; // Triggers re-run
+dispose(); // Cleanup
+```
+
+### 2. Reactive Child (Built on Reactive Scopes)
+
+Function children create `ReactiveChild` instances that manage dynamic DOM regions:
 
 ```tsx
 // This function child:
 <div>{() => state.count}</div>
 
-// Internally creates a ReactiveChild instance with an autorun:
-// 1. Runs the function to get the value
-// 2. Tracks that it accessed state.count
-// 3. Re-runs automatically when state.count changes
-// 4. Disposes old content before inserting new content
-// 5. Updates only this specific region of the DOM
+// Internally creates a ReactiveChild instance with a reactive scope:
+// 1. Creates a comment-bounded DOM region
+// 2. Runs a reactive scope (autorun) for the function
+// 3. Tracks that it accessed state.count
+// 4. Re-runs automatically when state.count changes
+// 5. Disposes old content before inserting new content
+// 6. Updates only this specific region of the DOM
 ```
 
-### Function Props
+### 3. Reactive Prop (Built on Reactive Scopes)
+
+Function props create reactive scopes registered with the current component:
 
 ```tsx
 // This reactive prop:
 <h1 style={() => ({ color: state.color })}>Hello</h1>
 
-// Creates an autorun registered with the current ReactiveComponent:
+// Creates a reactive scope (autorun) registered with the current ReactiveComponent:
 // 1. Runs the function to get the prop value
 // 2. Tracks that it accessed state.color
 // 3. Re-runs automatically when state.color changes
 // 4. Updates only this specific prop
+// 5. No DOM region needed - just updates the attribute/property
 ```
+
+**Key Distinction:**
+- **Reactive children** create `ReactiveChild` instances with DOM regions for content management
+- **Reactive props** create lightweight reactive scopes for attribute/property updates only
 
 ### DOM Regions
 
@@ -242,11 +270,12 @@ Reactive children use comment-bounded regions in the DOM:
 
 ```html
 <!-- reactive-scope -->
-  <div>Dynamic content here</div>
+<div>Dynamic content here</div>
 <!-- /reactive-scope -->
 ```
 
 Each region can:
+
 - Insert nodes before a reference node
 - Clear all content between markers
 - Track cleanup functions for removal
@@ -272,8 +301,8 @@ function Parent() {
 
   return (
     <div>
-      <button onClick={() => state.show = !state.show}>Toggle</button>
-      {() => state.show ? <ChildWithListeners /> : null}
+      <button onClick={() => (state.show = !state.show)}>Toggle</button>
+      {() => (state.show ? <ChildWithListeners /> : null)}
       {/* When toggled to null:
           - ReactiveChild disposes the old content
           - Child component's dispose() is called
@@ -287,14 +316,16 @@ function Parent() {
 
 ### Subscription Cleanup
 
-When a computation is disposed:
-1. Run the computation's cleanup function (if any)
-2. Remove the computation from all property listeners
-3. Clear the computation's subscription tracking
+When a reactive scope is disposed:
+
+1. Run the reactive scope's cleanup function (if any)
+2. Remove the reactive scope from all property listeners
+3. Clear the reactive scope's subscription tracking
 
 ### Event Listener Cleanup
 
 Event listeners are tracked by the current instance:
+
 - `setProp()` registers a cleanup function when adding listeners
 - Cleanup removes the listener when the instance disposes
 - Prevents memory leaks from orphaned event handlers
@@ -307,13 +338,19 @@ ReactiveChild handles various content transitions efficiently using smart diffin
 
 ```tsx
 // null → element
-{() => state.show ? <div>Hello</div> : null}
+{
+  () => (state.show ? <div>Hello</div> : null);
+}
 
 // element → element (same type)
-{() => state.active ? <div>Active</div> : <div>Inactive</div>}
+{
+  () => (state.active ? <div>Active</div> : <div>Inactive</div>);
+}
 
 // element → component
-{() => state.complex ? <ComplexComponent /> : <div>Simple</div>}
+{
+  () => (state.complex ? <ComplexComponent /> : <div>Simple</div>);
+}
 ```
 
 **Strategy:** Clear old content, insert new content
@@ -323,20 +360,26 @@ ReactiveChild handles various content transitions efficiently using smart diffin
 #### Non-Keyed Arrays
 
 ```tsx
-{() => state.items.map(item => <li>{item.name}</li>)}
+{
+  () => state.items.map((item) => <li>{item.name}</li>);
+}
 ```
 
 **Strategy:** Replace all items on every change
+
 - Simple and predictable
 - Inefficient for large lists with small changes
 
 #### Keyed Arrays
 
 ```tsx
-{() => state.items.map(item => <li key={item.id}>{item.name}</li>)}
+{
+  () => state.items.map((item) => <li key={item.id}>{item.name}</li>);
+}
 ```
 
 **Strategy:** Efficient keyed diffing
+
 1. Build map of old items by key (from both ReactiveComponents and DOM nodes)
 2. Remove items with keys not in new array
 3. Reorder/insert items based on new array order
@@ -347,10 +390,12 @@ ReactiveChild handles various content transitions efficiently using smart diffin
 The keyed diffing algorithm handles both component instances and intrinsic elements:
 
 1. **Build old map:**
+
    - Collect ReactiveComponents from children set
    - Scan DOM region for keyed intrinsic elements
 
 2. **Remove old keys:**
+
    - Dispose ReactiveComponents no longer in new array
    - Remove intrinsic DOM nodes no longer needed
 
@@ -365,14 +410,16 @@ The keyed diffing algorithm handles both component instances and intrinsic eleme
 The library is organized into focused modules:
 
 ### [reactivity.ts](packages/lib/src/reactivity.ts)
+
 - Proxy-based state management
 - Dependency tracking and subscriptions
 - `createState()` - Creates reactive state objects
-- `autorun()` - Creates reactive computations
+- `autorun()` - Creates reactive scopes that automatically re-run on dependency changes
 - `batch()` - Batches updates into single cycle
 - Global scope tracking (observation and component scopes)
 
 ### [component.ts](packages/lib/src/component.ts)
+
 - Component instance infrastructure
 - `ReactiveComponent` - User-defined function components
 - `ReactiveChild` - Reactive scope instances
@@ -380,14 +427,17 @@ The library is organized into focused modules:
 - Parent-child registration logic
 
 ### [dom.ts](packages/lib/src/dom.ts)
+
 - DOM manipulation utilities
 - `setProp()` - Sets properties/attributes with reactive support
+- `createReactiveProp()` - Creates reactive props (function props that auto-update)
 - `createRegion()` - Creates comment-bounded dynamic regions
 - `onMount()` - Registers mount callbacks
 - `onCleanup()` - Registers cleanup functions
 - Event listener tracking
 
 ### [jsx.ts](packages/lib/src/jsx.ts)
+
 - JSX factory and rendering
 - `h()` - JSX factory function (pragma)
 - `render()` - Mounts components into containers
@@ -396,10 +446,12 @@ The library is organized into focused modules:
 - Keyed diffing algorithm
 
 ### [jsx-runtime.ts](packages/lib/src/jsx-runtime.ts)
+
 - TypeScript JSX type definitions
 - `Fragment` component
 - JSX namespace for type safety
 
 ### [index.ts](packages/lib/src/index.ts)
+
 - Public API exports
 - Re-exports only public-facing functions and types

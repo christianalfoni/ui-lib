@@ -16,6 +16,41 @@ export function isEventProp(k: string): boolean {
 }
 
 /**
+ * Creates a reactive prop - a function prop that automatically re-evaluates
+ * when its dependencies change. Built on top of reactive scopes (autorun).
+ *
+ * Reactive props are registered with the current ReactiveComponent and
+ * disposed when the component unmounts.
+ *
+ * @param el - The DOM element to apply the prop to
+ * @param key - The prop name (e.g., "style", "className")
+ * @param fn - The function that computes the prop value
+ *
+ * @example
+ * // This reactive prop:
+ * <h1 style={() => ({ color: state.color })}>Hello</h1>
+ *
+ * // Creates a reactive scope that:
+ * // 1. Runs the function to get the prop value
+ * // 2. Tracks that it accessed state.color
+ * // 3. Re-runs automatically when state.color changes
+ * // 4. Updates only this specific prop
+ */
+function createReactiveProp(el: HTMLElement, key: string, fn: () => any): void {
+  const dispose = autorun(() => {
+    const result = runWithMemo(fn);
+    applyProp(el, key, result);
+  });
+
+  // Register disposal with current ReactiveComponent
+  // Reactive props are always owned by components, not reactive children
+  const instance = getCurrentInstance();
+  if (instance instanceof ReactiveComponent) {
+    instance.autorunDisposals.push(dispose);
+  }
+}
+
+/**
  * Sets a property or attribute on a DOM element
  */
 export function setProp(el: HTMLElement, key: string, value: any): void {
@@ -37,19 +72,9 @@ export function setProp(el: HTMLElement, key: string, value: any): void {
     return;
   }
 
-  // Handle function props for native elements (reactive scope)
+  // Handle reactive props - function props that create reactive scopes
   if (typeof value === "function") {
-    const dispose = autorun(() => {
-      const result = runWithMemo(value);
-      applyProp(el, key, result);
-    });
-
-    // Register disposal with current instance
-    // Only ReactiveComponent has autorunDisposals
-    const instance = getCurrentInstance();
-    if (instance instanceof ReactiveComponent) {
-      instance.autorunDisposals.push(dispose);
-    }
+    createReactiveProp(el, key, value);
     return;
   }
 
@@ -84,11 +109,7 @@ function applyProp(el: HTMLElement, key: string, value: any): void {
     return;
   }
 
-  // Avoid setting event handlers through applyProp (should go through setProp's event path)
-  if (isEventProp(key)) {
-    return;
-  }
-
+  // Set property or attribute
   if (key in el) {
     (el as any)[key] = value;
   } else {

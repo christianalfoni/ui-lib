@@ -135,7 +135,7 @@ The library implements a reactive UI system with automatic dependency tracking a
 - **`createState<T>(initial: T): T`** - Creates a reactive proxy that tracks property access
 - **`autorun(effect: Function): () => void`** - Runs an effect reactively, returns disposal function
 - **Proxy-based tracking** - Similar to MobX, automatically tracks which properties are accessed
-- **Subscription management** - Computations track their subscriptions for efficient cleanup
+- **Subscription management** - Reactive scopes track their subscriptions for efficient cleanup
 
 **autorun Example:**
 ```tsx
@@ -166,12 +166,13 @@ function MyComponent() {
 
 #### 2. DOM Utilities ([dom.ts](packages/lib/src/dom.ts))
 - **`setProp(el, key, value)`** - Sets properties/attributes on DOM elements with reactive support
+- **`createReactiveProp(el, key, fn)`** - Creates a reactive prop (internal, used by setProp)
 - **`createRegion(parent)`** - Creates a dynamic content region with cleanup tracking
 - **`isEventProp(key)`** - Identifies event handler props (onClick, onSubmit, etc.)
 - **`onMount(callback: () => void)`** - Registers a callback to run after the component is mounted to the DOM
 - **`onCleanup(cleanup: () => void)`** - Registers a cleanup function to run when the component unmounts
 - **Event listener tracking** - Automatically tracks and removes event listeners on cleanup
-- **Reactive prop cleanup** - Function props create autoruns that are disposed when elements unmount
+- **Reactive prop management** - Function props create reactive scopes that are disposed when components unmount
 
 **Lifecycle Callbacks:**
 ```tsx
@@ -231,9 +232,10 @@ Components follow a specific lifecycle with proper cleanup. For detailed informa
 4. **Unmounting** - Region cleanup runs, autoruns disposed, event listeners removed, nodes deleted
 
 **Cleanup System:**
-- Regions track cleanup functions that run when `clearAll()` is called
-- Elements track event listeners (`__listeners`) and reactive disposals (`__disposals`)
-- Autoruns properly dispose and remove subscriptions from property listeners
+- ReactiveChild instances manage their reactive scope disposal
+- ReactiveComponent instances track all reactive prop disposals
+- Event listeners are automatically removed on cleanup
+- Reactive scopes properly dispose and remove subscriptions from property listeners
 - Recursive cleanup ensures nested components are fully cleaned up
 
 **Example with cleanup:**
@@ -246,20 +248,59 @@ function MyComponent() {
       <button onClick={() => state.show = !state.show}>Toggle</button>
       {() => state.show ? <ChildWithListeners /> : null}
       {/* When toggled to null:
-          - Region's autorun is disposed
-          - Child's event listeners removed
-          - Child's reactive scopes disposed
+          - ReactiveChild's reactive scope is disposed
+          - Child component's event listeners removed
+          - Child component's reactive props disposed
           - No memory leaks */}
     </div>
   )
 }
 ```
 
+### Reactive Primitives
+
+The library provides three reactive primitives built on reactive scopes:
+
+#### 1. Reactive Scope (Low-Level)
+Created by `autorun()` - the foundational building block:
+```tsx
+const state = createState({ count: 0 });
+const dispose = autorun(() => {
+  console.log('Count:', state.count); // Automatically tracks dependencies
+});
+state.count++; // Triggers re-run
+dispose(); // Cleanup
+```
+
+#### 2. Reactive Child
+Function children (`{() => expr}`) create `ReactiveChild` instances:
+- Manage dynamic DOM regions with comment boundaries
+- Handle content insertion/removal
+- Support smart array diffing (keyed/non-keyed)
+```tsx
+<div>{() => state.count}</div>
+// Creates a ReactiveChild that updates only this region
+```
+
+#### 3. Reactive Prop
+Function props (`style={() => expr}`) create lightweight reactive scopes:
+- Update specific attributes/properties only
+- Registered with the current component
+- No DOM region overhead
+```tsx
+<h1 style={() => ({ color: state.color })}>Hello</h1>
+// Creates a reactive prop that updates only the style
+```
+
+**Key Distinction:**
+- **Reactive children** = ReactiveChild instance + DOM region
+- **Reactive props** = Reactive scope only (no region)
+
 ### Reactivity Rules
 
 1. **Components run once** - The component function body executes only once
-2. **Function children are reactive** - `{() => expr}` creates an observation scope
-3. **Function props are reactive** - `style={() => expr}` creates an observation scope
+2. **Function children create reactive children** - `{() => expr}` creates a ReactiveChild with a DOM region
+3. **Function props create reactive props** - `style={() => expr}` creates a reactive scope for that prop
 4. **Event handlers are NOT reactive** - `onClick={handler}` is a plain event listener
 5. **Arrays without keys replace all** - Non-keyed arrays are fully replaced on changes
 6. **Arrays with keys diff efficiently** - Keyed arrays only update changed elements

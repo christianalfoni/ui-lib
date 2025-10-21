@@ -3,7 +3,7 @@
  */
 
 // Reactivity
-export { createState, autorun, batch, type Computation, type Cleanup } from "./reactivity";
+export { createState, autorun, batch, type Cleanup } from "./reactivity";
 
 // DOM utilities
 export { setProp, isEventProp, createRegion, onMount, onCleanup, type Props } from "./dom";
