@@ -21,10 +21,19 @@ This document outlines the design and implementation plan for adding async React
   pending={<LoadingSpinner />}
   error={(err) => <ErrorMessage error={err} />}
 >
-  {() => fetchUser().then((user) => <UserProfile user={user} />)}
-  {() => fetchPosts().then((posts) => <PostList posts={posts} />)}
+  {() => (
+    <>
+      {() => fetchUser().then((user) => <UserProfile user={user} />)}
+      {() => fetchPosts().then((posts) => <PostList posts={posts} />)}
+    </>
+  )}
 </Suspense>
 ```
+
+**Important:** Suspense requires a function as its child (`{() => ...}`). This ensures:
+1. Children are evaluated inside Suspense's context (correct parent chain)
+2. Async ReactiveChildren can find their Suspense boundary
+3. Explicit lazy evaluation of suspended content
 
 ### Props
 
@@ -48,9 +57,11 @@ This document outlines the design and implementation plan for adding async React
 function App() {
   return (
     <Suspense pending={<Loading />}>
-      <div>
-        <NestedComponent />
-      </div>
+      {() => (
+        <div>
+          <NestedComponent />
+        </div>
+      )}
     </Suspense>
   );
 }
@@ -168,7 +179,7 @@ Mounted: Children content (all async work complete)
 function AsyncNestedComponent() {
   return (
     <Suspense pending={<InnerLoading />}>
-      <div>{async () => {}}</div>
+      {() => <div>{async () => {}}</div>}
     </Suspense>
   );
 }
@@ -398,6 +409,7 @@ export type { SuspenseProps } from "./suspense";
 | Scenario                              | Behavior                                                                                                      |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | No Suspense ancestor                  | **Throws error**: "Async reactive child must be wrapped in a `<Suspense>` component"                          |
+| Missing function wrapper              | Async children can't find Suspense (wrong parent chain) - throws same error as above                          |
 | Nested Suspense                       | Closest ancestor catches (first match in parent chain)                                                        |
 | Promise rejection                     | Error state shown via `error` prop                                                                            |
 | Component unmounts during pending     | ReactiveChild checks `isDisposed` in `.then()` callback - promise resolution ignored, no rendering attempted |
@@ -413,44 +425,74 @@ export type { SuspenseProps } from "./suspense";
 ### Test Cases
 
 1. **Basic async child**
-
+   ```tsx
+   <Suspense pending={<Loading />}>
+     {() => <AsyncComponent />}
+   </Suspense>
+   ```
    - Single async ReactiveChild resolves
    - Suspense shows pending → children
 
 2. **Multiple async children**
-
+   ```tsx
+   <Suspense pending={<Loading />}>
+     {() => (
+       <>
+         {() => fetchA()}
+         {() => fetchB()}
+         {() => fetchC()}
+       </>
+     )}
+   </Suspense>
+   ```
    - 3 async children resolve at different times
-   - Suspense waits for all before showing children
+   - Suspense waits for **all** to resolve before showing children
 
 3. **Nested async components**
-
    - Async child resolves to component with more async children
-   - Suspense goes back to pending until all nested async resolves
+   - Suspense stays in pending state (never unmounts pending)
 
 4. **Error handling**
-
    - Async child rejects
    - Suspense shows error prop
 
 5. **Nested Suspense**
-
+   ```tsx
+   <Suspense pending={<OuterLoading />}>
+     {() => (
+       <Suspense pending={<InnerLoading />}>
+         {() => <AsyncComponent />}
+       </Suspense>
+     )}
+   </Suspense>
+   ```
    - Inner Suspense catches its async children
    - Outer Suspense not affected by inner async children
 
-6. **No Suspense boundary**
+6. **Missing function wrapper**
+   ```tsx
+   <Suspense pending={<Loading />}>
+     <AsyncComponent /> {/* ❌ Missing () => wrapper */}
+   </Suspense>
+   ```
+   - AsyncComponent's async children won't find Suspense (wrong parent chain)
+   - Throws: "Async reactive child must be wrapped in a `<Suspense>` component"
 
+7. **No Suspense boundary**
+   ```tsx
+   <div>{async () => fetchData()}</div>
+   ```
    - Async ReactiveChild without Suspense ancestor
    - Throws clear error message
 
-7. **Cleanup during pending**
-
+8. **Cleanup during pending**
    - Suspense unmounts while Promise pending
    - ReactiveChild disposed (sets `isDisposed = true`)
    - Promise eventually resolves
    - `.then()` callback checks `isDisposed` and returns early
    - No rendering attempted, no memory leaks
 
-8. **Re-fetches**
+9. **Re-fetches**
    - Reactive child returns new Promise on re-run
    - Suspense goes back to pending
 
@@ -502,11 +544,13 @@ function App() {
       pending={<div>Loading...</div>}
       error={(err) => <div>Error: {err.message}</div>}
     >
-      <div>{() => fetchData().then((data) => <Display data={data} />)}</div>
+      {() => <div>{() => fetchData().then((data) => <Display data={data} />)}</div>}
     </Suspense>
   );
 }
 ```
+
+**Note:** The outer `{() => ...}` is required by Suspense to establish the correct parent chain for async children.
 
 ### Breaking Changes
 

@@ -13,14 +13,32 @@ function App() {
   });
 
   return (
-    <h4
-      onClick={() => state.count++}
-      style={() => ({
-        color: state.count % 2 ? "red" : "blue",
-      })}
-    >
-      The count is: {() => state.count}
-    </h4>
+    <div>
+      <h4
+        onClick={() => state.count++}
+        style={() => ({
+          color: state.count % 2 ? "red" : "blue",
+        })}
+      >
+        The count is: {() => state.count}
+      </h4>
+      <button
+        onClick={() => {
+          state.todos.push({
+            id: Date.now(),
+            description: "Hihihi",
+            completed: false,
+          });
+        }}
+      >
+        Add todo
+      </button>
+      <ul>
+        {() =>
+          state.todos.map((todo) => <li key={todo.id}>{todo.description}</li>)
+        }
+      </ul>
+    </div>
   );
 }
 
