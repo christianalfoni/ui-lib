@@ -3,15 +3,20 @@
  *
  * This module implements the logical component tree that runs parallel to the DOM tree.
  * It provides two instance types:
- * - ReactiveComponent: Represents user-defined function components
- * - ReactiveChild: Represents reactive scopes created by function children in JSX
+ * - Component: Represents user-defined function components
+ * - ReactiveContent: Represents reactive scopes created by function children in JSX
  *
  * Both types are internal implementation details and not exposed in the public API.
+ */
+
+import { autorun } from './reactivity';
+
+/**
  *
  * ## Parent-Child Registration Flow
  *
- * ### ReactiveComponent as Parent
- * When a ReactiveComponent is created with another ReactiveComponent as parent,
+ * ### Component as Parent
+ * When a Component is created with another Component as parent,
  * it automatically registers itself with the parent during construction. This is safe
  * because component render is deterministic - once a component returns JSX, those
  * child components are permanent for that component's lifetime.
@@ -23,11 +28,11 @@
  * }
  * ```
  *
- * ### ReactiveChild as Parent
- * When a ReactiveComponent is created with a ReactiveChild as parent (i.e., inside
+ * ### ReactiveContent as Parent
+ * When a Component is created with a ReactiveContent as parent (i.e., inside
  * a reactive function like {() => <Component />}), it does NOT auto-register.
  *
- * Why? ReactiveChild runs an autorun that:
+ * Why? ReactiveContent runs an autorun that:
  * 1. Disposes all current children at the start of each evaluation
  * 2. Re-evaluates the function
  * 3. Adds the new children to the set
@@ -35,7 +40,7 @@
  * If components auto-registered during step 2, they would be in the children set
  * and immediately disposed in step 1 of the NEXT cycle, even if they should be kept.
  *
- * Instead, ReactiveChild explicitly adds children after successful evaluation,
+ * Instead, ReactiveContent explicitly adds children after successful evaluation,
  * ensuring only the final, rendered components are tracked.
  *
  * Example of problematic auto-registration:
@@ -44,7 +49,7 @@
  *
  * // Cycle 1:
  * // - autorun runs, creates MemoTest instance A
- * // - A auto-registers with ReactiveChild
+ * // - A auto-registers with ReactiveContent
  * // - A is added to children set
  *
  * // Cycle 2 (when state changes):
@@ -72,17 +77,37 @@
  */
 
 // Shared parent type for both instance types
-export type ReactiveInstance = ReactiveComponent | ReactiveChild;
+export type ReactiveInstance = Component | ReactiveContent;
 
 /**
- * ReactiveComponent - Represents user-defined components (function components)
+ * ReactiveAttribute - A tiny abstraction over autorun for reactive props
+ *
+ * - Created for function props like style={() => expr}
+ * - Manages a single reactive autorun scope
+ * - Provides simple disposal
+ */
+export class ReactiveAttribute {
+  private disposal: (() => void) | null = null;
+
+  constructor(effect: () => void) {
+    this.disposal = autorun(effect);
+  }
+
+  dispose() {
+    this.disposal?.();
+    this.disposal = null;
+  }
+}
+
+/**
+ * Component - Represents user-defined components (function components)
  *
  * - Exists independently from DOM nodes
- * - Tracks children (both ReactiveComponent and ReactiveChild)
+ * - Tracks children (both Component and ReactiveContent)
  * - Owns cleanup responsibilities (event listeners, autoruns, user cleanups)
  * - Disposes entire subtree recursively
  */
-export class ReactiveComponent {
+export class Component {
   parent: ReactiveInstance | null = null;
   children: Set<ReactiveInstance> = new Set();
   cleanups: Array<() => void> = [];
@@ -93,15 +118,15 @@ export class ReactiveComponent {
 
   constructor(parent: ReactiveInstance | null) {
     this.parent = parent;
-    // Only auto-register with ReactiveComponent parents
-    // ReactiveChild parents will manually add children after evaluation
+    // Only auto-register with Component parents
+    // ReactiveContent parents will manually add children after evaluation
     //
-    // WHY: ReactiveChild runs autoruns that re-evaluate and dispose old children
+    // WHY: ReactiveContent runs autoruns that re-evaluate and dispose old children
     // at the start of each cycle. If we auto-register during construction, the
     // newly created component would be in the children set and immediately disposed
-    // before we determine it should be kept. Instead, ReactiveChild explicitly
+    // before we determine it should be kept. Instead, ReactiveContent explicitly
     // adds children after successful evaluation (see appendChild in jsx.ts).
-    if (parent instanceof ReactiveComponent) {
+    if (parent instanceof Component) {
       parent.children.add(this);
     }
   }
@@ -152,16 +177,16 @@ export class ReactiveComponent {
 }
 
 /**
- * ReactiveChild - Represents reactive scopes created by function children in JSX
+ * ReactiveContent - Represents reactive scopes created by function children in JSX
  *
  * - Only created for reactive JSX children ({() => ...}), not for reactive props
  * - Manages a region of dynamic DOM content bounded by comment markers
  * - Owns its autorun disposal
  * - Provides cleanup context for intrinsic elements created inside the reactive scope
- * - Tracks child ReactiveComponents (from keyed arrays within the reactive scope)
+ * - Tracks child Components (from keyed arrays within the reactive scope)
  * - Smart diffing for content updates
  */
-export class ReactiveChild {
+export class ReactiveContent {
   parent: ReactiveInstance | null;
   children: Set<ReactiveInstance> = new Set();
   cleanups: Array<() => void> = [];
@@ -218,21 +243,21 @@ export function getCurrentInstance(): ReactiveInstance | null {
 }
 
 /**
- * Convenience accessor for users (only exposes ReactiveComponent)
+ * Convenience accessor for users (only exposes Component)
  * Used by public APIs like onMount and onCleanup
  */
-export function getCurrentComponent(): ReactiveComponent | null {
+export function getCurrentComponent(): Component | null {
   const instance = CURRENT_INSTANCE;
-  return instance instanceof ReactiveComponent ? instance : null;
+  return instance instanceof Component ? instance : null;
 }
 
 /**
- * Enter a component scope, creating a new ReactiveComponent instance
+ * Enter a component scope, creating a new Component instance
  */
 export function enterComponentScope(
   parent: ReactiveInstance | null
-): ReactiveComponent {
-  const component = new ReactiveComponent(parent);
+): Component {
+  const component = new Component(parent);
   CURRENT_INSTANCE = component;
   return component;
 }
@@ -240,29 +265,29 @@ export function enterComponentScope(
 /**
  * Exit the current component scope, returning to the parent
  */
-export function exitComponentScope(): ReactiveComponent | null {
+export function exitComponentScope(): Component | null {
   const component = CURRENT_INSTANCE;
   CURRENT_INSTANCE = component?.parent ?? null;
-  return component as ReactiveComponent;
+  return component as Component;
 }
 
 /**
- * Enter a reactive scope, creating a new ReactiveChild instance
+ * Enter a reactive scope, creating a new ReactiveContent instance
  */
 export function enterReactiveScope(
   parent: ReactiveInstance | null,
   region: any
-): ReactiveChild {
-  const reactiveChild = new ReactiveChild(parent, region);
-  CURRENT_INSTANCE = reactiveChild;
-  return reactiveChild;
+): ReactiveContent {
+  const reactiveContent = new ReactiveContent(parent, region);
+  CURRENT_INSTANCE = reactiveContent;
+  return reactiveContent;
 }
 
 /**
  * Exit the current reactive scope, returning to the parent
  */
-export function exitReactiveScope(): ReactiveChild | null {
-  const reactiveChild = CURRENT_INSTANCE;
-  CURRENT_INSTANCE = reactiveChild?.parent ?? null;
-  return reactiveChild as ReactiveChild;
+export function exitReactiveScope(): ReactiveContent | null {
+  const reactiveContent = CURRENT_INSTANCE;
+  CURRENT_INSTANCE = reactiveContent?.parent ?? null;
+  return reactiveContent as ReactiveContent;
 }

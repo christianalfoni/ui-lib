@@ -6,7 +6,10 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace=demo",
-    "build:lib": "npm run build --workspace=lib",
-    "dev:all": "npm run dev:lib --workspace=lib & npm run dev --workspace=demo"
+    "build:lib": "npm run build --workspace=@ui-lib/lib",
+    "dev:all": "concurrently \"npm run dev:lib --workspace=@ui-lib/lib\" \"npm run dev --workspace=demo\" --names \"lib,demo\" --prefix-colors \"blue,green\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
   }
 }

@@ -5,8 +5,8 @@
 import { autorun, runWithMemo } from "./reactivity";
 import { setProp, createRegion, type Props } from "./dom";
 import {
-  ReactiveComponent,
-  ReactiveChild,
+  Component,
+  ReactiveContent,
   getCurrentInstance,
   enterComponentScope,
   exitComponentScope,
@@ -34,7 +34,7 @@ export type Child =
   | Child[]
   | (() => any)
   | KeyedItem
-  | ReactiveComponent;
+  | Component;
 
 /**
  * Internal function that evaluates a component function
@@ -44,8 +44,8 @@ function evaluateComponentFunction(
   type: Function,
   props: Record<string, any>,
   children: Child[],
-  parentInstance: ReactiveComponent | ReactiveChild | null
-): ReactiveComponent {
+  parentInstance: Component | ReactiveContent | null
+): Component {
   const component = enterComponentScope(parentInstance);
 
   let result;
@@ -54,7 +54,7 @@ function evaluateComponentFunction(
     // Set domRoot based on what the component returns
     if (result instanceof Node) {
       component.domRoot = result;
-    } else if (result instanceof ReactiveComponent) {
+    } else if (result instanceof Component) {
       component.domRoot = result.domRoot;
     } else {
       component.domRoot = null;
@@ -79,7 +79,7 @@ export function createElement(
   type: any,
   props: Record<string, any>,
   children: Child[]
-): Node | KeyedItem | ReactiveComponent {
+): Node | KeyedItem | Component {
   const { key, ...rest } = props;
 
   // If we have a key, delay evaluation by returning a KeyedItem
@@ -110,7 +110,7 @@ export function h(
   type: any,
   props: Props | null,
   ...restChildren: Child[]
-): Node | KeyedItem | ReactiveComponent {
+): Node | KeyedItem | Component {
   props = props || {};
   const { children: propChildren, ...rest } = props as Props & { key?: Key };
   const children: Child[] =
@@ -132,7 +132,7 @@ function isKeyedItem(value: any): value is KeyedItem {
  * Evaluates a KeyedItem into an actual Node
  */
 function evaluateKeyedItem(item: KeyedItem): {
-  instance: ReactiveComponent | null;
+  instance: Component | null;
   node: Node;
 } {
   const { type, props, children } = item.value;
@@ -164,12 +164,12 @@ function evaluateKeyedItem(item: KeyedItem): {
  * Renders a node into a container element
  */
 export function render(
-  node: Node | KeyedItem | (() => any) | ReactiveComponent,
+  node: Node | KeyedItem | (() => any) | Component,
   container: Element
 ): { dispose: () => void } {
-  let rootComponent: ReactiveComponent | null = null;
+  let rootComponent: Component | null = null;
 
-  if (node instanceof ReactiveComponent) {
+  if (node instanceof Component) {
     rootComponent = node;
     if (node.domRoot) {
       container.appendChild(node.domRoot);
@@ -198,10 +198,10 @@ export function render(
  * Helper to normalize any value to a Node and instance
  */
 function normalizeToInstanceAndNode(item: any): {
-  instance: ReactiveComponent | null;
+  instance: Component | null;
   node: Node;
 } {
-  if (item instanceof ReactiveComponent) {
+  if (item instanceof Component) {
     // domRoot should always be set for components that return DOM nodes
     if (!item.domRoot) {
       throw new Error("Component did not return a valid DOM node");
@@ -223,8 +223,8 @@ function normalizeToInstanceAndNode(item: any): {
 function appendChild(parent: Node, child: Child): void {
   if (child == null || child === false) return;
 
-  // Handle ReactiveComponent
-  if (child instanceof ReactiveComponent) {
+  // Handle Component
+  if (child instanceof Component) {
     if (child.domRoot) {
       parent.appendChild(child.domRoot);
       child.callMountCallbacks();
@@ -232,13 +232,13 @@ function appendChild(parent: Node, child: Child): void {
     return;
   }
 
-  // Function child => create ReactiveChild for reactive JSX child
+  // Function child => create ReactiveContent for reactive JSX child
   // This is ONLY for {() => ...} in JSX children, not for reactive props
   if (typeof child === "function") {
     // Create a bounded region in the DOM for this reactive content
     const region = createRegion(parent);
     const parentInstance = getCurrentInstance();
-    const reactiveChild = enterReactiveScope(parentInstance, region);
+    const reactiveContent = enterReactiveScope(parentInstance, region);
 
     // Set up an autorun that re-evaluates whenever dependencies change
     const dispose = autorun(() => {
@@ -256,13 +256,13 @@ function appendChild(parent: Node, child: Child): void {
       };
 
       // CLEANUP PHASE: Dispose all children from the previous evaluation cycle
-      // This is safe because ReactiveComponents with ReactiveChild parents
+      // This is safe because Components with ReactiveContent parents
       // do NOT auto-register during construction (see component.ts constructor).
       // Only children from the previous evaluation cycle are in this set.
-      for (const childInstance of reactiveChild.children) {
+      for (const childInstance of reactiveContent.children) {
         childInstance.dispose();
       }
-      reactiveChild.children.clear();
+      reactiveContent.children.clear();
 
       // RENDER PHASE: Determine what to render
 
@@ -278,9 +278,9 @@ function appendChild(parent: Node, child: Child): void {
         region.clearContent();
         region.insertBeforeRef(node, null);
         if (instance) {
-          // Manually register the component with the ReactiveChild parent
+          // Manually register the component with the ReactiveContent parent
           // (see component.ts for why we don't auto-register)
-          reactiveChild.children.add(instance);
+          reactiveContent.children.add(instance);
           instance.callMountCallbacks();
         }
         return;
@@ -306,8 +306,8 @@ function appendChild(parent: Node, child: Child): void {
           const { instance, node } = normalizeToInstanceAndNode(item);
           region.insertBeforeRef(node, null);
           if (instance) {
-            // Manually register the component with the ReactiveChild parent
-            reactiveChild.children.add(instance);
+            // Manually register the component with the ReactiveContent parent
+            reactiveContent.children.add(instance);
             instance.callMountCallbacks();
           }
         }
@@ -332,13 +332,13 @@ function appendChild(parent: Node, child: Child): void {
       }
 
       // STEP 1: Build a map of old (existing) keyed items
-      // We need to track BOTH ReactiveComponents AND intrinsic DOM nodes
-      const oldByKey = new Map<Key, { instance: ReactiveComponent | null; node: Node }>();
+      // We need to track BOTH Components AND intrinsic DOM nodes
+      const oldByKey = new Map<Key, { instance: Component | null; node: Node }>();
 
-      // 1a. Add ReactiveComponents from the children set
-      for (const childInstance of reactiveChild.children) {
+      // 1a. Add Components from the children set
+      for (const childInstance of reactiveContent.children) {
         if (
-          childInstance instanceof ReactiveComponent &&
+          childInstance instanceof Component &&
           childInstance.domRoot
         ) {
           const key = (childInstance.domRoot as any).__key;
@@ -369,7 +369,7 @@ function appendChild(parent: Node, child: Child): void {
         if (!newKeySet.has(k)) {
           // This key is gone - clean it up
           if (entry.instance) {
-            // Dispose ReactiveComponent (handles cleanup, event listeners, etc.)
+            // Dispose Component (handles cleanup, event listeners, etc.)
             entry.instance.dispose();
           } else {
             // For intrinsic elements, just remove from DOM
@@ -385,7 +385,7 @@ function appendChild(parent: Node, child: Child): void {
       // We iterate backwards to maintain correct positioning relative to the end marker
       const parentNode = region.end.parentNode!;
       let insertBeforeRef: Node | null = region.end;
-      const newChildren = new Set<ReactiveComponent>();
+      const newChildren = new Set<Component>();
 
       for (let i = keyedItems.length - 1; i >= 0; i--) {
         const k = newKeys[i];
@@ -406,7 +406,7 @@ function appendChild(parent: Node, child: Child): void {
           region.insertBeforeRef(node, insertBeforeRef);
           insertBeforeRef = node;
           if (instance) {
-            // Manually register the component with the ReactiveChild parent
+            // Manually register the component with the ReactiveContent parent
             newChildren.add(instance);
             instance.callMountCallbacks();
           }
@@ -415,10 +415,10 @@ function appendChild(parent: Node, child: Child): void {
 
       // STEP 5: Replace the children set with the new one
       // Old children that weren't in newChildren were already disposed in step 3
-      reactiveChild.children = newChildren;
+      reactiveContent.children = newChildren;
     });
 
-    reactiveChild.autorunDisposal = dispose;
+    reactiveContent.autorunDisposal = dispose;
     exitReactiveScope();
 
     return;

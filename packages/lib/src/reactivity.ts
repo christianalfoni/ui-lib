@@ -151,12 +151,12 @@ function createReactiveProxy<T extends object>(target: T): T {
 
           const result = (value as Function).apply(this, args);
 
+          // Queue notifications (must happen before CHANGE_COUNTER is incremented)
+          PENDING_NOTIFICATIONS.add(() => notifyListeners(obj, prop));
+          PENDING_NOTIFICATIONS.add(() => notifyListeners(obj, 'length'));
+
           // Restore batching state
           BATCHING = wasBatching;
-
-          // Trigger all listeners for this array and its length property
-          notifyListeners(obj, prop);
-          notifyListeners(obj, 'length');
 
           // If we're not nested in another batch, flush pending notifications
           if (!wasBatching) {
@@ -196,7 +196,15 @@ function createReactiveProxy<T extends object>(target: T): T {
 
     deleteProperty(obj, prop) {
       const result = Reflect.deleteProperty(obj, prop);
-      notifyListeners(obj, prop);
+
+      // Respect batching and increment change counter
+      if (BATCHING) {
+        PENDING_NOTIFICATIONS.add(() => notifyListeners(obj, prop));
+      } else {
+        CHANGE_COUNTER++;
+        notifyListeners(obj, prop);
+      }
+
       return result;
     }
   });

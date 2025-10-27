@@ -232,8 +232,8 @@ Components follow a specific lifecycle with proper cleanup. For detailed informa
 4. **Unmounting** - Region cleanup runs, autoruns disposed, event listeners removed, nodes deleted
 
 **Cleanup System:**
-- ReactiveChild instances manage their reactive scope disposal
-- ReactiveComponent instances track all reactive prop disposals
+- ReactiveContent instances manage their reactive scope disposal
+- Component instances track all reactive attribute disposals
 - Event listeners are automatically removed on cleanup
 - Reactive scopes properly dispose and remove subscriptions from property listeners
 - Recursive cleanup ensures nested components are fully cleaned up
@@ -248,9 +248,9 @@ function MyComponent() {
       <button onClick={() => state.show = !state.show}>Toggle</button>
       {() => state.show ? <ChildWithListeners /> : null}
       {/* When toggled to null:
-          - ReactiveChild's reactive scope is disposed
+          - ReactiveContent's reactive scope is disposed
           - Child component's event listeners removed
-          - Child component's reactive props disposed
+          - Child component's reactive attributes disposed
           - No memory leaks */}
     </div>
   )
@@ -272,35 +272,36 @@ state.count++; // Triggers re-run
 dispose(); // Cleanup
 ```
 
-#### 2. Reactive Child
-Function children (`{() => expr}`) create `ReactiveChild` instances:
+#### 2. Reactive Content
+Function children (`{() => expr}`) create `ReactiveContent` instances:
 - Manage dynamic DOM regions with comment boundaries
 - Handle content insertion/removal
 - Support smart array diffing (keyed/non-keyed)
 ```tsx
 <div>{() => state.count}</div>
-// Creates a ReactiveChild that updates only this region
+// Creates a ReactiveContent that updates only this region
 ```
 
-#### 3. Reactive Prop
-Function props (`style={() => expr}`) create lightweight reactive scopes:
+#### 3. Reactive Attribute
+Function props (`style={() => expr}`) create `ReactiveAttribute` instances:
+- Lightweight abstraction over autorun
 - Update specific attributes/properties only
 - Registered with the current component
 - No DOM region overhead
 ```tsx
 <h1 style={() => ({ color: state.color })}>Hello</h1>
-// Creates a reactive prop that updates only the style
+// Creates a ReactiveAttribute that updates only the style
 ```
 
 **Key Distinction:**
-- **Reactive children** = ReactiveChild instance + DOM region
-- **Reactive props** = Reactive scope only (no region)
+- **Reactive content** = ReactiveContent instance + DOM region
+- **Reactive attributes** = ReactiveAttribute instance (no region)
 
 ### Reactivity Rules
 
 1. **Components run once** - The component function body executes only once
-2. **Function children create reactive children** - `{() => expr}` creates a ReactiveChild with a DOM region
-3. **Function props create reactive props** - `style={() => expr}` creates a reactive scope for that prop
+2. **Function children create reactive content** - `{() => expr}` creates a ReactiveContent with a DOM region
+3. **Function props create reactive attributes** - `style={() => expr}` creates a ReactiveAttribute for that prop
 4. **Event handlers are NOT reactive** - `onClick={handler}` is a plain event listener
 5. **Arrays without keys replace all** - Non-keyed arrays are fully replaced on changes
 6. **Arrays with keys diff efficiently** - Keyed arrays only update changed elements

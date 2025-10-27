@@ -2,8 +2,8 @@
  * DOM manipulation utilities and helpers
  */
 
-import { autorun, runWithMemo } from "./reactivity";
-import { getCurrentInstance, getCurrentComponent, ReactiveComponent } from "./component";
+import { runWithMemo } from "./reactivity";
+import { getCurrentInstance, getCurrentComponent, Component, ReactiveAttribute } from "./component";
 import classNames from "classnames";
 
 export type Props = Record<string, any> & { children?: any };
@@ -17,7 +17,7 @@ export function isEventProp(k: string): boolean {
 
 /**
  * Creates a reactive prop - a function prop that automatically re-evaluates
- * when its dependencies change. Built on top of reactive scopes (autorun).
+ * when its dependencies change. Built on top of ReactiveAttribute.
  *
  * Reactive props are registered with the current ReactiveComponent and
  * disposed when the component unmounts.
@@ -30,23 +30,23 @@ export function isEventProp(k: string): boolean {
  * // This reactive prop:
  * <h1 style={() => ({ color: state.color })}>Hello</h1>
  *
- * // Creates a reactive scope that:
+ * // Creates a ReactiveAttribute that:
  * // 1. Runs the function to get the prop value
  * // 2. Tracks that it accessed state.color
  * // 3. Re-runs automatically when state.color changes
  * // 4. Updates only this specific prop
  */
 function createReactiveProp(el: HTMLElement, key: string, fn: () => any): void {
-  const dispose = autorun(() => {
+  const attribute = new ReactiveAttribute(() => {
     const result = runWithMemo(fn);
     applyProp(el, key, result);
   });
 
-  // Register disposal with current ReactiveComponent
-  // Reactive props are always owned by components, not reactive children
+  // Register disposal with current Component
+  // Reactive props are always owned by components, not reactive content
   const instance = getCurrentInstance();
-  if (instance instanceof ReactiveComponent) {
-    instance.autorunDisposals.push(dispose);
+  if (instance instanceof Component) {
+    instance.autorunDisposals.push(() => attribute.dispose());
   }
 }
 
